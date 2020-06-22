@@ -1,0 +1,1099 @@
+---
+title: "Test cyto-fe"
+author: "Amy Fox"
+date: "6/21/20"
+output: html_document
+---
+
+
+This dataset includes mice that were vaccinated with either PBS (control) or BCG. 12 weeks later these mice were infected with *Mycobacterium tuberculosis*. They were evaluated via CFUs for bacterial burden and flow cytometry for immune populations 30, 60, and 90 days post-infection. A Cytek Aurora was used to collect the flow cytometry data.
+
+Data Manipulations
+- removed CD69 and FoxP3 markers because spillover
+- removed D30 PBS D mouse because outlier
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+First, the packages must be loaded.
+library(flowCore) - need this package if going to transform the data
+```{r warning= FALSE, message = FALSE}
+library(tibble)
+library(openCyto)
+library(data.table)
+library(ggcyto)
+library(grid)
+library(pheatmap)
+library(stringr)
+library(readxl)
+library(gridExtra)
+library(ggcorrplot)
+library(tidyverse)
+library(scales)
+library(viridis)
+library(superheat)
+library(kableExtra)
+library(ggpubr)
+library(broom)
+library(jpeg)
+
+library(mycyto) # this is my package
+# detach(package:mycyto, unload=TRUE) use this to detach and reload
+viridis_colors <- c("#3F4788FF", "#56C667FF")
+```
+
+I have created a few functions to make it easier to analyze the data.
+
+- `clean_FMO_after_gate`: renames the columns; it also removes SSC boundary effects
+
+
+
+
+
+# Data Cleaning
+
+Read in the initial gating strategy, which gates to live lymphocytes, into a `gatingTemplate` class.
+
+```{r}
+# Identify the file with the gating strategy 
+ws <- list.files("../Cyto-feature_engineering/data/flow/BCG_v_PBS", 
+                 pattern = "AmyGating_intracellular.csv", 
+                 full = TRUE)
+ws
+```
+
+```{r}
+# View this template
+dtTemplate <- fread(ws)
+dtTemplate
+```
+
+```{r message = FALSE, warning = FALSE}
+# Read in the gating strategy to a 'gatingTemplate' object
+initial_gate <- gatingTemplate(ws) 
+plot(initial_gate)
+```
+
+Gating the sample data
+
+I checked that all D30, D60, and D90 samples have Zombie and will run all the way through the gating when separated by day. Looking at the data, some of them are labeled Zombie NIR-A and Zombie Nir-A which means that they are not recognized as the same. - D90 has uncapitalized. I will need to read them in separately and then rename one of the two so that the cases match
+
+```{r warning=FALSE, fig.height=2.5, fig.width=2.5}
+
+fcsFiles <- list.files("../Cyto-feature_engineering/data/flow/BCG_v_PBS/Tcell/", 
+                       pattern = ".fcs", full = TRUE)
+
+# ncdfFlowset object contains row names with the individual samples and column names with the markers/parameters used in the flow cytometer
+ncfs <- read.ncdfFlowSet(fcsFiles) 
+
+# apply gating set
+gs <- GatingSet(ncfs)
+
+# gate the samples
+gt_gating(initial_gate, gs)
+
+# View the gates
+plotGate(gs[[9]])
+
+
+
+
+
+# Pull out the gated data
+gated_data <- gs_pop_get_data(gs, "live") %>% 
+  as.flowSet() 
+
+
+# read in the D90 data
+D90_ws <- list.files("../Cyto-feature_engineering/data/flow/BCG_v_PBS", 
+                     pattern = "AmyGating_intracellular_D90.csv", full = TRUE)
+
+D90_initial_gate <- gatingTemplate(D90_ws, autostart = 1L) 
+
+D90_fcsFiles <- list.files("../Cyto-feature_engineering/data/flow/BCG_v_PBS/Tcell/D90", 
+                       pattern = ".fcs", full = TRUE)
+
+# ncdfFlowset object contains row names with the individual samples and column names with the markers/parameters used in the flow cytometer
+D90_ncfs <- read.ncdfFlowSet(D90_fcsFiles) 
+
+# apply gating set
+D90_gs <- GatingSet(D90_ncfs)
+
+# gate the samples
+gt_gating(D90_initial_gate, D90_gs)
+
+# Pull out the data
+D90_gated_data <- gs_pop_get_data(D90_gs, "live") %>% 
+  as.flowSet() 
+
+# initialize the gated data df
+all_gated_df = data.frame()
+
+# convert the gated flow files to dataframes and add a filename column
+for (i in 1:length(gated_data)) {
+  all_data <- gated_data[[i]] %>%
+    exprs() %>%
+    data.frame() %>%
+    mutate(filename = sampleNames(gated_data[i])) 
+
+  all_gated_df <- rbind(all_gated_df, all_data)
+}
+
+# initialize the D90 gated data df
+D90_all_gated_df = data.frame()
+
+# convert the gated flow files to dataframes and add a filename column
+for (i in 1:length(D90_gated_data)) {
+  D90_all_data <- D90_gated_data[[i]] %>%
+    exprs() %>%
+    data.frame() %>%
+    mutate(filename = sampleNames(D90_gated_data[i])) 
+
+  D90_all_gated_df <- rbind(D90_all_gated_df, D90_all_data)
+}
+
+# remove parameters that are not found in D30 and D60 data and rename the D90 Zombie column
+D90_all_gated_df <- D90_all_gated_df %>%
+  select(Time, SSC.H, FSC.H, ends_with(".A"), 
+         `FSC.A`, `SSC.A`, -`SSC.B.A`, filename) %>%
+  rename("Zombie.NIR.A" = "Zombie.Nir.A")
+
+# combine the D30, D60, and D90 data into 1 dataframe
+all_gated_df <- rbind(all_gated_df, D90_all_gated_df)
+
+# confirm that all of the data is here
+unique(all_gated_df$filename)
+
+fig_1a <- ggcyto(gs[[3]], aes(x = `FSC.A`, y = `FSC.H`)) + 
+  geom_hex(bins = 50) + 
+  geom_gate("singlets") +
+  scale_fill_viridis_c() +
+  xlab("FSC-A") +
+  ylab("FSC-H") +
+  ggtitle("Singlets") +
+  theme_gray() +
+  geom_stats(size = 7) + 
+  theme(strip.text = element_blank(),
+        axis.text = element_text(size = 24),
+        axis.title = element_text(size = 37),
+        title = element_text(size = 37)) +
+  scale_x_continuous(n.breaks = 3)
+
+fig_1a
+
+#ggsave("../figures/fig_1a.jpeg", fig_1a, dpi = 300)
+
+fig_1b <- ggcyto(gs[[3]], aes(x = `FSC-A`, y = `SSC-A`)) + 
+  ggcyto_par_set(limits = list(y = c(0, 3.5e6), x = c(-100, 3.5e6)))+
+  geom_hex(bins = 80) + 
+  geom_gate("lymph") +
+  scale_fill_viridis_c() +
+  xlab("FSC-A") +
+  ylab("SSC-A") +
+  ggtitle("Leukocytes") +
+  theme_gray() +
+  geom_stats(size = 7)+ 
+  theme(strip.text = element_blank(),
+        axis.text = element_text(size = 24),
+        axis.title = element_text(size = 37),
+        title = element_text(size = 37))+
+  scale_x_continuous(n.breaks = 3)
+
+fig_1b
+
+#ggsave("../figures/fig_1b.jpeg", fig_1b, dpi = 300)
+
+fig_1c <- ggcyto(gs[[3]], aes(x = `Zombie Nir-A`)) + 
+  geom_area(stat = "density", fill = "#440154FF") +
+  geom_gate("live")   +
+  ggcyto_par_set(limits = list(y = c(0, 5e-5), x = c(-1000, 1e5)))+
+  xlab("Zombie NIR-A") +
+  ylab("Density") +
+  ggtitle("Live") +
+  theme_gray() +
+  geom_stats(size = 7, adjust = 0.45, position = position_nudge(x = 5000)) +
+  labs_cyto("both") + 
+  theme(strip.text = element_blank(),
+        axis.text = element_text(size = 24),
+        axis.title = element_text(size = 37),
+        title = element_text(size = 37))+
+  scale_x_continuous(n.breaks = 3)
+
+fig_1c
+
+#ggsave("../figures/fig_1c.jpeg", fig_1c, dpi = 300)
+```
+
+## Data cleaning of FMOs
+
+
+
+Read in the flow cytometry data from the FMO experiments.
+
+```{r}
+# Identify the file names of all 20 FCS flow cytometry experiments to 
+# read in. 
+FMO_fcsFiles <- list.files("../Cyto-feature_engineering/data/flow/BCG_v_PBS/Tcell/FMO_Final", 
+                       pattern = ".fcs", full = TRUE)
+FMO_fcsFiles
+```
+
+```{r}
+# Read these files into a 'ncdfFlowSet' object. This will taken a minute
+# or so to run. The resulting 'ncdfFlowset' object contains row names with the 
+# individual samples and column names with the markers/parameters used in the flow cytometer.
+ncfs_FMO <- read.ncdfFlowSet(FMO_fcsFiles, channel_alias = data.frame(alias = c("Zombie Nir-A"), channels = c("Zombie_NIR-A, Zombie NIR-A, Zombie Nir-A"))) 
+
+ncfs_FMO
+```
+
+Apply the initial gating to filter the data to only measurements on live lymphocyte cells.
+
+```{r}
+# Convert to a 'GatingSet' object, so we can apply the initial gating to this data.
+gs_FMO <- GatingSet(ncfs_FMO)
+gs_FMO
+```
+
+```{r fig.height = 8, fig.width = 4}
+# Apply the initial gating to this data, to filter to only measurements
+# on live lymphocyte cells. This may take a minute.
+gt_gating(initial_gate, gs_FMO)
+
+# You can plot the results of this gating with `plotGate`. For example, to plot
+# the gating for the first sample, run:
+plotGate(gs_FMO[[1]])
+```
+
+## Convert data to "tidy data" format
+
+Now that the initial gating has been applied, to limit the data to measurements oflive, singlet lymphocyte cells, we convert the data to a "tidy data" format, to allow us to work with "tidyverse" tools for further analysis and visualization.
+
+```{r}
+# Pull out the data from the 'live' node of the gating set (the last node
+# in the initial gating strategy).
+FMO_gated_data <- gs_pop_get_data(gs_FMO, "live") %>% 
+  as.flowSet() 
+```
+
+Apply this function to the 'flowSet' of gated FMO data:
+
+```{r}
+FMO_gated_data <- tidy_flow_set(FMO_gated_data)
+FMO_gated_data
+```
+
+
+```{r}
+# confirm that all of the files were read in correctly
+unique(FMO_gated_data$filename)
+```
+
+This visualization is to look at the initial gating of the FMOs to ensure that the gates are placed correctly.
+```{r fig.height = 8, fig.width = 4}
+plotGate(gs_FMO[[3]])
+```
+
+# Feature Engineering
+## FMOs
+Pull out the individual FMOS
+
+```{r}
+FMO_gated_data <- gs_pop_get_data(gs_FMO, "live") %>% 
+  as.flowSet() %>%
+  tidy_flow_set()
+
+colnames(FMO_gated_data)
+
+```
+
+## Gate on FMOs with 99% threshold for + and - populations
+Feature engineering FMOs and plot
+
+```{r fig.width=8, fig.height=6}
+
+# note that here the filename and the column marker names need to match exactly
+FMO_gated_data_clean <- FMO_gated_data %>%
+  select(ends_with("-A"), -`FSC-A`, `SSC-A`, filename) %>%
+  dplyr::rename(`FoxP3` = "APC-A",
+         `CD44` = "APC-Fire 750-A",
+        `CD103` =  "APC-R700-A",       
+         `CD3` = "Alexa Fluor 532-A",
+         `Sca1` = "BB515-A",
+         `IL_10` = "BV421-A",
+         `CD4` = "BV480-A",
+         `CD69` = "BV510-A",
+         `CD8` = "BV570-A", 
+         `CTLA4` = "BV605-A",
+         `CD27` = "BV650-A",
+         `CD153` = "BV711-A",
+         `KLRG1` = "BV785-A",
+         `IL_17` = "PE-A",
+         `CD122` = "PE-Cy5-A",
+         `IFN` = "PE-Cy7-A", 
+         `CD62L` = "PE-Dazzle594-A",
+         `TNF` = "Pacific Blue-A", 
+         `CD28` = "PE-Cy5.5-A",
+         `PD1` = "PerCP-eFluor 710-A")  %>%
+   na.omit()%>%
+  dplyr::filter(`SSC-A` != max(`SSC-A`)) %>%
+  mutate(filename = str_replace(filename, "FMOs_", "")) %>%
+  mutate(filename = str_replace(filename, "_[:digit:]*_[:digit:]*_Unmixed.fcs", "")) %>%
+  mutate(filename = str_replace(filename, "_June_6_Redo_Unmixed.fcs", "")) %>%
+mutate(filename = str_replace(filename, "-", "_")) %>%
+  mutate(filename = str_replace(filename, "TNF_a", "TNF")) %>%
+  mutate(filename = str_replace(filename, "IFN_G", "IFN"))
+  
+unique(FMO_gated_data_clean$filename)
+
+testing <- FMO_gated_data_clean %>%
+  gather(key = "marker", value = "MFI", -filename, -`SSC-A`,)
+
+right <- testing %>%
+  filter(str_detect(testing$filename, fixed(testing$marker)) &
+           str_detect(testing$marker, fixed(testing$filename))) 
+
+add_quantile <- right %>%
+  group_by(filename) %>%
+  summarise(quantile_99 = quantile(MFI, 0.99)) 
+
+right_quantile <- full_join(right, add_quantile, by = "filename")
+unique(right_quantile$filename)
+ggplot(right_quantile, aes(x = MFI, y = `SSC-A`)) +
+   geom_hex(bins = 300, na.rm = TRUE) +
+   scale_fill_viridis_c() +
+  facet_wrap(~ marker, nrow = 3) +
+   ylab("") +
+   geom_vline(mapping = aes(xintercept = quantile_99)) +
+  theme_gray() +
+  theme(axis.text = element_text(size =12),
+        axis.title = element_text(size = 20),
+        strip.text = element_text(size = 12))+
+  scale_x_continuous(labels = scientific, limits = c(-10000, 20000), breaks = c(0, 50000))
+
+#ggsave("../figures/fig_2.jpeg", fig_2, dpi = 300)
+```
+
+
+## Feature engineer the data
+
+Feature cut the data to get all of the possible populations for each file with the cell count and number of cells. Feature engineering is based on the 99%.
+
+Remove FoxP3
+Remove CD69 - spreading from Sca1 makes the marker unusable
+Remove D30 PBS D - flow cytometry outlier, both within group, timepoint, and all samples
+```{r}
+
+all_gated <- all_gated_df %>%
+  dplyr::filter(filename != "D30_Lung_Group 1 D_20190218_153300_Unmixed.fcs") %>%
+  mutate(Time = str_extract(filename, "D[0-9]*")) %>%
+  mutate(Group = str_extract(filename, "Group\\s[0-9]\\s[A-Z]")) %>%
+  unite(filename, c("Time", "Group")) %>%
+  mutate(filename= str_replace_all(filename, "\\s", "_")) %>%
+  select(ends_with(".A"), -`FSC.A`, filename) %>%
+  dplyr::rename(`FoxP3` = "APC.A",
+         `CD44` = "APC.Fire.750.A",
+        `CD103` =  "APC.R700.A",       
+         `CD3` = "Alexa.Fluor.532.A",
+         `Sca1` = "BB515.A",
+         `IL_10` = "BV421.A",
+         `CD4` = "BV480.A",
+         `CD69` = "BV510.A",
+         `CD8` = "BV570.A", 
+         `CTLA4` = "BV605.A",
+         `CD27` = "BV650.A",
+         `CD153` = "BV711.A",
+         `KLRG1` = "BV785.A",
+         `IL_17` = "PE.A",
+         `CD122` = "PE.Cy5.A",
+         `IFN` = "PE.Cy7.A", 
+         `CD62L` = "PE.Dazzle594.A",
+         `TNF` = "Pacific.Blue.A", 
+         `CD28` = "PE.Cy5.5.A",
+         `PD1` = "PerCP.eFluor.710.A") %>%
+  na.omit() %>%
+  dplyr::filter(`SSC.A` != max(`SSC.A`)) %>%
+  mutate(CD3 = fe(add_quantile, CD3, "CD3"),
+         CD4 = fe(add_quantile, CD4, "CD4"),
+         CD8 = fe(add_quantile, CD8, "CD8"),
+         CD44 = fe(add_quantile, CD44, "CD44"),
+         CD103 = fe(add_quantile, CD103, "CD103"),
+         Sca1 = fe(add_quantile, Sca1, "Sca1"),
+         IL_17 = fe(add_quantile,IL_17, "IL_17"),
+         CD69 = fe(add_quantile,CD69, "CD69"),
+         CTLA4 = fe(add_quantile,CTLA4, "CTLA4"),
+         CD27 = fe(add_quantile,CD27, "CD27"),
+         CD153 = fe(add_quantile,CD153, "CD153"),
+         KLRG1 = fe(add_quantile,KLRG1, "KLRG1"),
+         IFN = fe(add_quantile,IFN, "IFN"),
+         FoxP3 = fe(add_quantile,FoxP3, "FoxP3"),
+         CD122 = fe(add_quantile,CD122, "CD122"),
+         PD1 = fe(add_quantile,PD1, "PD1"),
+         CD62L = fe(add_quantile,CD62L, "CD62L"),
+         IL_10 = fe(add_quantile,IL_10, "IL_10"),
+         CD28 = fe(add_quantile,CD28, "CD28"),
+         TNF = fe(add_quantile,TNF, "TNF")) %>%
+  select(-Zombie.NIR.A, -AF.A, -SSC.A, -FoxP3, -CD69) %>%
+  mutate_at(vars(-group_cols()), list(~tidyr::replace_na(.,0))) %>%
+  group_by(CD3, CD4, CD8, CD44, CD103, Sca1, IL_17, CTLA4, CD27, 
+           CD153, KLRG1, IFN,  CD122, PD1, CD62L, IL_10, CD28,
+           TNF, filename) %>%
+  dplyr::mutate(cell_no = n()) %>%
+  unique() %>%
+  ungroup() %>%
+  dplyr::group_by(filename) %>%
+  dplyr::mutate(total_count_by_file = sum(cell_no),
+         percentage = (100*cell_no / total_count_by_file)) %>%
+  ungroup() 
+
+```
+
+# Visualization
+## Initial identification of populations plot
+
+We first want to view all of the different cell phenotypes within the data, and then we can filter the data to see the ones that we're interested in, for example, CD3+ cells that constitute >0.5% of total live leukocytes in a sample.
+
+```{r fig.height = 3, fig.width = 2.5}
+# to view all of the possible combinations
+total_phenotypes <- all_gated %>%
+    select(-filename, -percentage, -cell_no, -total_count_by_file) %>%
+  group_by(CD3, CD4, CD8, CD44, CD103, Sca1, IL_17,  CTLA4, CD27, 
+           CD153, KLRG1, IFN,  CD122, PD1, CD62L, IL_10, CD28,
+           TNF) %>%
+  unique() %>%
+  ungroup() %>%
+ select(CD3, CD4, CD8, CD44, CD62L, Sca1, CD103, CTLA4, CD27, CD122, CD153, CD28, PD1, KLRG1, IL_17, IL_10, IFN,  TNF) %>%
+  mutate_all(~as.numeric.factor(.)) 
+
+supp_2 <-pheatmap(total_phenotypes, cluster_rows = FALSE, cluster_cols = FALSE, 
+         color = viridis_colors, show_rownames = FALSE, legend = F, fontsize = 6, angle_col = 45, width = 2, height = 1.5) 
+
+#ggsave("../figures/supp_2.jpeg", supp_2, dpi = 300)
+
+
+# gives the total number of populations
+nrow(total_phenotypes) 
+
+
+
+
+```
+
+## Filter to smaller subset of populations and plot
+
+Want to add annotations to the phenotype plot
+
+- lineage
+- cell
+- resident
+
+based on expression of different markers. The phenotype plot is then arranged by lineage, cell and resident cells and split by the lineage (I should try to find a way to do this automatically).
+
+```{r fig.width = 4, fig.height = 6}
+# view the specific cell phenotypes we're interested in
+sample_populations <- all_gated %>%
+  dplyr::filter(CD3 == 1 & percentage > 0.5) %>%
+  select(-filename, -percentage, -cell_no, -total_count_by_file) %>%
+  group_by(CD3, CD4, CD8, CD44, CD103, Sca1, IL_17, CTLA4, CD27, 
+           CD153, KLRG1, IFN,  CD122, PD1, CD62L, IL_10, CD28,
+           TNF) %>%
+  unique() %>%
+  ungroup() %>%
+  mutate(population = paste0("Pop", 1:length(CD3)))
+
+# add in the percentage of cells in each specific population after the filter
+test <- left_join(sample_populations, all_gated)
+
+# expand to add in the data where a mouse may have 0 cells in a certain population identified after the filter
+all_options <- expand(test, population, filename)
+
+# add in the population information
+add_pops <- left_join(all_options, sample_populations)
+
+# add populations to the original gated data and replace NA percentages with 0
+sample_populations_all_groups <- left_join(add_pops, all_gated) %>%
+  select(population, filename, percentage) %>%
+  mutate_all(list(~tidyr::replace_na(.,0)))
+
+# these are the colors I want for the pheatmap annotations
+my_colors <- list(lineage = c(`Double Negative` = "darkturquoise", 
+                              `T Helper` = "plum3",
+                              `Cytotoxic T` = "hotpink",
+                              `Double Positive` = "orange"),
+                  cell = c(`Central Mem` = "darkorchid1", `Effector` = "#F8766D",
+                `TSCM` = "#00B0F6", `Unknown` = "yellow"),
+                resident = c(`Resident`  = "maroon2", `Non-resident` = "azure"))
+
+# take the filtered data and add annotations for the differnt lineages, cell type, and resident status
+phenotype_data <- sample_populations %>%
+  mutate_all(~as.numeric.factor(.)) %>%
+      mutate(lineage = ifelse(CD4 == 0 & CD8 ==0, "Double Negative",
+                          ifelse(CD4 == 1 & CD8 ==0,"T Helper",
+                          ifelse(CD4 ==0 & CD8 ==1, "Cytotoxic T", 
+                                 "Double Positive")))) %>%
+  mutate(cell = ifelse(CD44 == 0 & CD62L == 1 & Sca1 == 1, "TSCM", 
+                       ifelse(CD44 ==1 & CD62L==0, "Effector", 
+                              ifelse(CD44 == 0 & CD62L == 1 & Sca1 == 0, "Naive",
+                                     ifelse(CD44==1 & CD62L ==1, "Central Mem",
+                                     "Unknown"))))) %>%
+  mutate(resident = ifelse(CD103 == 1, "Resident", "Non-resident")) %>%
+  select(lineage, cell, resident, CD3, CD4, CD8, CD44, CD62L, Sca1, CD103,  CTLA4, CD27, CD122, CD153, CD28, PD1, KLRG1, IL_17, IL_10, IFN,  TNF) %>%
+  arrange(match(lineage, c("Double Negative", "T Helper", "Cytotoxic T", "Double Positive")), cell, resident) %>%
+  mutate(population = c(paste0("Pop", 1: nrow(sample_populations)))) %>%
+  column_to_rownames("population") %>%
+  rename(`IL-17` = `IL_17`,
+         `IL-10` = `IL_10`)
+
+# create an annotated data frame to add to pheatmap
+phenotype_annot <- phenotype_data %>%
+  select(resident, cell, lineage) %>%
+  mutate(population = c(paste0("Pop", 1: nrow(sample_populations)))) %>%
+  column_to_rownames("population")
+
+# count the number of rows with each phenotype to create gaps in the plot
+DN_length <- sum(phenotype_data$lineage == "Double Negative")
+T_helper_length <- sum(phenotype_data$lineage == "T Helper")
+Cytotoxic_length <- sum(phenotype_data$lineage == "Cytotoxic T")
+DP_length <- sum(phenotype_data$lineage == "Double Positive")
+
+# plot the data with different annotations
+fig_3a <- pheatmap(phenotype_data[, 4:21], cluster_rows = FALSE, cluster_cols = FALSE,
+           labels_row = paste("Pop", 1:nrow(sample_populations)), 
+           annotation_row = phenotype_annot,  gaps_row = c(DN_length, DN_length + T_helper_length, DN_length + T_helper_length + Cytotoxic_length),
+           cellwidth = 15, cellheight = 15, angle_col = 45, annotation_colors = my_colors,
+         color = viridis_colors, cutree_rows = 2, legend = FALSE)
+
+fig_3a
+
+#ggsave("../figures/fig_3a.jpeg", fig_3a, dpi = 300)
+```
+
+Want to get the percentages added so can plot the percentages with the new 
+
+```{r}
+# change the population rownames to column 
+phenotype_data <- phenotype_data %>%
+  rownames_to_column(var = "population")%>%
+  rename(`IL_17` = `IL-17`,
+         `IL_10` = `IL-10`)
+
+# convert the marker columns of factor class into numeric
+all_gated <- all_gated %>%
+  mutate_if(is.factor, ~as.numeric.factor(.)) 
+
+# add the percentages from original data to the populations of filtered data
+add_perc <- left_join(phenotype_data, all_gated)
+
+# expand the data so can see which files have 0 cells in a phenotype
+all_options <- expand(add_perc, population, filename)
+
+# add the populations back 
+add_pops <- left_join(all_options, phenotype_data)
+
+# add the percentages back
+sample_populations_all_groups <- left_join(add_pops, all_gated) %>%
+  select(population, filename, percentage) %>%
+  mutate_all(list(~replace_na(., 0))) 
+
+# confirm that the populations were added correctly
+unique(sample_populations_all_groups$population)
+
+```
+
+## Correlation plot
+Data Visualization
+
+ - Population correlation Plot
+
+```{r fig.height = 6, fig.width = 6}
+
+# correlation plot without the name "pop"
+corr <- sample_populations_all_groups %>%
+  mutate(population= str_replace(population, "Pop", "")) %>%
+  spread(key = population, value = percentage) %>%
+  select(-filename) %>%
+  select(c(paste0(1:nrow(phenotype_data))))
+
+corr <- round(cor(corr), 1)
+
+# plot the population correlation plot separated by the lineages
+fig_3b <- superheat(corr,  row.title = "Populations", column.title = "Populations",  column.title.size = 8, row.title.size = 8, bottom.label.col = c(rep("darkturquoise", DN_length), rep("plum3", T_helper_length), rep("hotpink", Cytotoxic_length), rep("orange", DP_length)), left.label.col = c(rep("darkturquoise", DN_length), rep("plum3", T_helper_length), rep("hotpink", Cytotoxic_length), rep("orange", DP_length)), bottom.label.size = .05, left.label.size = .05, bottom.label.text.size = 5, left.label.text.size = 5)
+
+fig_3b
+
+#ggsave("../figures/fig_3b.jpeg", fig_3b[[2]], dpi = 300)
+```
+
+## Time series plot
+Data visualization
+
+- time series
+- treated v. untreated
+
+```{r fig.width = 6, fig.height= 4.5}
+color_for_facets <- phenotype_data %>%
+  select(lineage, population) %>%
+  mutate(col = ifelse(lineage == "Double Negative", "darkturquoise", 
+                      ifelse(lineage == "T Helper", "plum3",
+                             ifelse(lineage == "Cytotoxic T", "hotpink", 
+                                    ifelse(lineage == "Double Positive", "orange", "brown")))))
+
+
+# take the data for filtered populations and rename so that plots are pretty
+pops_for_plots_average <- sample_populations_all_groups %>%
+  separate(filename, into = c("Timepoint", "Mouse", "Group", "Number"), sep = "_") %>%
+  dplyr::group_by(population, Timepoint, Group) %>%
+  dplyr::mutate(average_percent = mean(percentage)) %>%
+  select(-Number, -percentage, -Mouse) %>%
+  ungroup() %>%
+  unique() %>%
+  dplyr::mutate(Group = str_replace(Group, "1", "PBS"),
+         Group = str_replace(Group, "2", "BCG")) %>%
+  dplyr::mutate(Timepoint = str_replace(Timepoint, "D30", "30"),
+         Timepoint = str_replace(Timepoint, "D60", "60"),
+         Timepoint = str_replace(Timepoint, "D90", "90")) %>%
+  mutate(Group = str_replace(Group, "PBS", "Control"),
+         Group = str_replace(Group, "BCG", "Vaccinated"))
+
+facets_for_timeseries <- left_join(pops_for_plots_average, color_for_facets, by = "population")
+
+# convert populations to factor to put in order for the plot
+facets_for_timeseries$population <-  factor(facets_for_timeseries$population, 
+                                    levels = paste0("Pop", c(1:length(unique(facets_for_timeseries$population)))))
+
+
+fig_4 <- ggplot(facets_for_timeseries, aes(x = factor(Timepoint, levels = c("30", "60", "90")),
+                                 y = average_percent, group = Group, color = Group)) +
+  geom_rect(aes(fill = col),xmin = -Inf,xmax = Inf,
+            ymin = -Inf,ymax = Inf, alpha = 0.2) +
+  scale_fill_identity() +
+  geom_point() +
+  geom_line() +
+  facet_wrap("population", scales = "free", ncol = 7) +
+  xlab("Days Post-Infection") +
+  ylab("Average Percent of Total Live Leukocytes") +
+  scale_color_manual(values = c("black", "white")) +
+  theme_gray() +
+    theme(axis.text.x = element_text(angle = 45, size = 13, hjust = 1),
+        axis.text.y = element_text(size = 13),
+        strip.text.x = element_text(size = 10),
+        axis.title = element_text(size = 17),
+        title = element_text(size = 20),
+        legend.text = element_text(size=18),
+        legend.key.size = unit(1.5, "line"))
+
+
+fig_4
+#ggsave("../figures/fig_4.jpeg", fig_4, dpi = 300)
+```
+
+## Box plot and Bar plot
+
+Extra visualizations
+```{r fig.width = 6.5, fig.height= 6.5}
+# Vaccinated v. unvaccinated for Day 30 bar
+facets_for_vacc_v_unvacc <- facets_for_timeseries %>%
+  filter(Timepoint == 30)
+  
+# bar plot
+supp_3a <- ggplot(facets_for_vacc_v_unvacc, aes(x = Group,
+                                 y = average_percent, group = Group, fill = Group)) +
+  geom_rect(aes(fill = c(col)),xmin = -Inf,xmax = Inf,
+            ymin = -Inf,ymax = Inf, alpha = .6) +
+  geom_bar(stat = "identity") +
+  facet_wrap("population", scales = "free", ncol = 7) +
+  scale_fill_manual(values = c("Control" = "black", "Vaccinated" = "white", "darkturquoise" = "darkturquoise",  "hotpink" = "hotpink","orange" = "orange","plum3" = "plum3")) +
+  xlab("Vaccination Status") +
+  ylab("Average Percent of Cells") +
+  ggtitle("Lung Cell Percentage of Total Live Leukocytes") +
+  theme_gray() +
+    theme(axis.text.x = element_text(angle = 40, size = 15, hjust = 1),
+        axis.text.y = element_text(size = 15),
+        strip.text.x = element_text(size = 13),
+        axis.title = element_text(size = 20),
+        title = element_text(size = 20),
+        legend.text = element_text(size=18),
+        legend.key.size = unit(1.5, "line"),
+        legend.position = "none")
+supp_3a
+#ggsave("../figures/supp_3a.jpeg", supp_3a, dpi = 300)
+
+# boxplot
+facets_for_boxplot <- sample_populations_all_groups %>%
+  separate(filename, into = c("Timepoint", "Mouse", "Group", "Number"), sep = "_") %>%
+  dplyr::group_by(population, Timepoint, Group) %>%
+  dplyr::mutate(average_percent = mean(percentage)) %>%
+  select(-Number, -Mouse) %>%
+  ungroup() %>%
+  unique() %>%
+  dplyr::mutate(Group = str_replace(Group, "1", "PBS"),
+         Group = str_replace(Group, "2", "BCG")) %>%
+  dplyr::mutate(Timepoint = str_replace(Timepoint, "D30", "30"),
+         Timepoint = str_replace(Timepoint, "D60", "60"),
+         Timepoint = str_replace(Timepoint, "D90", "90")) %>%
+  filter(Timepoint == 30) %>%
+  mutate(Group = str_replace(Group, "PBS", "Control"),
+         Group = str_replace(Group, "BCG", "Vaccinated"))
+
+# add background colors
+facets_for_boxplot <- left_join(facets_for_boxplot, color_for_facets, by = "population")
+
+# convert populations to factor to put in order for the plot
+facets_for_boxplot$population <-  factor(facets_for_boxplot$population, 
+                                    levels = paste0("Pop", c(1:length(unique(facets_for_boxplot$population)))))
+
+# boxplot
+supp_3b <- ggplot(facets_for_boxplot, aes(x = Group,
+                                 y = percentage, group = Group, fill = Group)) +
+  geom_rect(aes(fill = c(col)),xmin = -Inf,xmax = Inf,
+            ymin = -Inf,ymax = Inf, alpha = .2) +
+  geom_boxplot() +
+  facet_wrap("population", scales = "free", ncol = 7) +
+  scale_fill_manual(values = c("Control" = "black", "Vaccinated" = "white", "darkturquoise" = "darkturquoise",  "hotpink" = "hotpink","orange" = "orange","plum3" = "plum3")) +
+  xlab("Vaccination Status") +
+  ylab("Percent of Cells") +
+  ggtitle("Lung Cell Percentage of Total Live Leukocytes") +
+  theme_gray() +
+    theme(axis.text.x = element_text(angle = 40, size = 15, hjust = 1),
+        axis.text.y = element_text(size = 15),
+        strip.text.x = element_text(size = 13),
+        axis.title = element_text(size = 20),
+        title = element_text(size = 20),
+        legend.text = element_text(size=18),
+        legend.key.size = unit(1.5, "line"),
+        legend.position = "none") 
+
+supp_3b
+#ggsave("../figures/supp_3b.jpeg", supp_3b, dpi = 300)
+
+# violin plot
+ggplot(facets_for_boxplot, aes(x = Group,
+                                 y = percentage, group = Group, fill = Group)) +
+  geom_rect(aes(fill = c(col)),xmin = -Inf,xmax = Inf,
+            ymin = -Inf,ymax = Inf, alpha = .2) +
+  geom_violin() +
+  facet_wrap("population", scales = "free", ncol = 7) +
+  scale_fill_manual(values = c("Control" = "black", "Vaccinated" = "white", "darkturquoise" = "darkturquoise",  "hotpink" = "hotpink","orange" = "orange","plum3" = "plum3")) +
+  xlab("Vaccination Status") +
+  ylab("Percent of Cells") +
+  ggtitle("Lung Cell Percentage of Total Live Leukocytes") +
+  theme_gray() +
+    theme(axis.text.x = element_text(angle = 40, size = 13, hjust = 1),
+        axis.text.y = element_text(size = 13),
+        strip.text.x = element_text(size = 10),
+        axis.title = element_text(size = 20),
+        title = element_text(size = 20),
+        legend.text = element_text(size=18),
+        legend.key.size = unit(1.5, "line"),
+        legend.position = "none")
+```
+
+# Hypothesis testing
+## Linear regression
+## Multiple comparison testing: Benjamini and Hochberg
+Data Visualization
+
+- CFU Correlation
+
+```{r fig.width = 4.5, fig.height= 5}
+
+# read in the CFU data
+CFUs <- read_xlsx("../data/M.smeg_CFU.xlsx") %>%
+  dplyr::filter(Organ == "Lung") %>%
+  dplyr::filter(Group == "Group1" | Group == "Group2")
+
+# clean the flow data and prepare to join with CFU
+pops_for_CFUs <- sample_populations_all_groups %>%
+  separate(filename, into = c("Timepoint", "Mouse", "Group", "Number"), sep = "_") %>%
+  dplyr::mutate(Timepoint = str_replace(Timepoint, "D", "")) %>%
+  dplyr::mutate(Timepoint = as.numeric(Timepoint)) %>%
+  unite(Group, c(Mouse, Group)) %>%
+  dplyr::mutate(Group = str_replace(Group, "_", "")) 
+
+# join together the CFU data and the population data
+pops_CFUs <- inner_join(pops_for_CFUs, CFUs, by = c("Group", "Number", "Timepoint")) 
+
+facets_for_CFUs <- left_join(pops_CFUs, color_for_facets, by = "population")
+
+facets_for_CFUs$population <-  factor(facets_for_CFUs$population, 
+                                    levels = paste0("Pop", c(1:length(unique(facets_for_CFUs$population)))))
+
+ggplot(facets_for_CFUs, aes(percentage, CFU)) +
+  geom_rect(aes(fill = col),xmin = -Inf,xmax = Inf,
+            ymin = -Inf,ymax = Inf, alpha = 0.05) + 
+  scale_fill_identity() +
+  geom_point(color = "black") +
+  geom_smooth(method = "lm", se = FALSE, color = "#3F4788FF") +
+  facet_wrap(~population, scales = "free_x", ncol = 6) +
+  stat_smooth_func(geom= "text", method = "lm", hjust = 0, parse = TRUE, color = "white") +
+  xlab("Percentage of Cells") +
+  ylab("log10 CFU") +
+  ggtitle("Population and CFU Linear regression") +
+  theme(axis.text.x = element_text(size = 9, hjust = 1, angle = 45),
+        axis.text.y = element_text(size = 9),
+        axis.title = element_text(size = 15),
+        title = element_text(size = 17))
+
+#ggsave("../figures/fig_5b.jpeg", dpi = 300)
+
+fitted_models <- facets_for_CFUs %>% 
+  group_by(population) %>% 
+  do(model = lm(percentage ~ CFU, data = .)) %>%
+  tidy(model) %>%
+  filter(term == "CFU") %>%
+  select(population, p.value) %>%
+  rename(p.value = p.value) %>%
+  ungroup()
+
+fitted_models %>%
+  mutate(p.val.adj = p.adjust(fitted_models$p.value, "BH")) %>%
+  mutate("Significance" = p.val.adj < 0.05) %>%
+  rename("p-value" = p.value,
+         "Adjusted p-value" = p.val.adj) %>%
+  kable(align = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  row_spec(0:nrow(fitted_models), color = "black")
+
+# me testing out
+
+fitted_models <- facets_for_CFUs %>% 
+  group_by(population) %>% 
+  do(model = lm(percentage ~ CFU, data = .)) %>%
+  glance(model) %>%
+  select(population, r.squared, p.value) %>%
+  ungroup()
+
+fitted_models %>%
+  mutate(p.val.adj = p.adjust(fitted_models$p.value, "BH")) %>%
+  mutate("Significance" = p.val.adj < 0.05) %>%
+  rename("p-value" = p.value,
+         "r squared" = r.squared,
+         "Adjusted p-value" = p.val.adj) %>%
+  kable(align = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), font_size = 15) %>%
+  row_spec(0:nrow(fitted_models), color = "black")
+
+```
+
+
+Visualization for individual populations
+```{r}
+pop_pick <- facets_for_CFUs %>%
+  filter(population == "Pop32")
+
+ggplot(pop_pick, aes(percentage, CFU)) +
+  geom_rect(aes(fill = col),xmin = -Inf,xmax = Inf,
+            ymin = -Inf,ymax = Inf, alpha = 0.05) + 
+  scale_fill_identity() +
+  geom_point(color = "black", size = 4) +
+  geom_smooth(method = "lm", se = FALSE, color = "#3F4788FF") +
+  stat_smooth_func(geom= "text", method = "lm", hjust = 0, parse = TRUE, color = "white", size = 8) +
+  xlab("Percentage of Cells") +
+  ylab("log10 CFU") +
+  ggtitle("Population 32 and CFU Linear regression") +
+  theme(axis.text.x = element_text(size = 13, hjust = 1),
+        axis.text.y = element_text(size = 13),
+        axis.title = element_text(size = 15),
+        title = element_text(size = 17))
+
+pop_timeseries <- facets_for_timeseries  %>%
+  filter(population == "Pop3")
+
+ggplot(pop_timeseries, aes(x = factor(Timepoint, levels = c("30", "60", "90")),
+                                 y = average_percent, group = Group, color = Group)) +
+  geom_rect(aes(fill = col),xmin = -Inf,xmax = Inf,
+            ymin = -Inf,ymax = Inf, alpha = 0.2) +
+  scale_fill_identity() +
+  geom_point(size = 4) +
+  geom_line(size = 2) +
+  xlab("Days Post-Infection") +
+  ylab("Average Percent of Total Live Leukocytes") +
+  ggtitle("Pop 3") +
+  scale_color_manual(values = c("black", "white")) +
+  theme_gray() +
+    theme(axis.text.x = element_text(angle = 45, size = 13, hjust = 1),
+        axis.text.y = element_text(size = 13),
+        strip.text.x = element_text(size = 10),
+        axis.title = element_text(size = 17),
+        title = element_text(size = 20),
+        legend.text = element_text(size=18),
+        legend.key.size = unit(1.5, "line"))
+
+```
+
+Different timepoints for hypothesis
+```{r}
+
+# D30
+facets_for_CFUs_D30 <- facets_for_CFUs %>%
+  filter(Timepoint == 30)
+
+ggplot(facets_for_CFUs_D30, aes(percentage, CFU)) +
+  geom_rect(aes(fill = col),xmin = -Inf,xmax = Inf,
+            ymin = -Inf,ymax = Inf, alpha = 0.2) + 
+  scale_fill_identity() +
+  geom_point(color = "black") +
+  geom_smooth(method = "lm", se = FALSE, color = "#3F4788FF") +
+  facet_wrap(~population, scales = "free_x", ncol = 9) +
+  stat_smooth_func(geom= "text", method = "lm", hjust = 0, parse = TRUE) +
+  scale_x_continuous(breaks = scales::pretty_breaks(3)) +
+  xlab("Percentage of Cells") +
+  ylab("log10 CFU") +
+  ggtitle("Day 30: Population and CFU Linear regression") +
+  theme(axis.text.x = element_text(size = 9, hjust = 1),
+        axis.text.y = element_text(size = 9),
+        axis.title = element_text(size = 15),
+        title = element_text(size = 17))
+
+# D60
+facets_for_CFUs_D60 <- facets_for_CFUs %>%
+  filter(Timepoint == 60)
+
+ggplot(facets_for_CFUs_D60, aes(percentage, CFU)) +
+  geom_rect(aes(fill = col),xmin = -Inf,xmax = Inf,
+            ymin = -Inf,ymax = Inf, alpha = 0.2) + 
+  scale_fill_identity() +
+  geom_point(color = "black") +
+  geom_smooth(method = "lm", se = FALSE, color = "#3F4788FF") +
+  facet_wrap(~population, scales = "free_x", ncol = 9) +
+  stat_smooth_func(geom= "text", method = "lm", hjust = 0, parse = TRUE) +
+  scale_x_continuous(breaks = scales::pretty_breaks(3)) +
+  xlab("Percentage of Cells") +
+  ylab("log10 CFU") +
+  ggtitle("Day 60: Population and CFU Linear regression") +
+  theme(axis.text.x = element_text(size = 9, hjust = 1),
+        axis.text.y = element_text(size = 9),
+        axis.title = element_text(size = 15),
+        title = element_text(size = 17))
+
+# D90
+facets_for_CFUs_D90 <- facets_for_CFUs %>%
+  filter(Timepoint == 90)
+
+ggplot(facets_for_CFUs_D90, aes(percentage, CFU)) +
+  geom_rect(aes(fill = col),xmin = -Inf,xmax = Inf,
+            ymin = -Inf,ymax = Inf, alpha = 0.2) + 
+  scale_fill_identity() +
+  geom_point(color = "black") +
+  geom_smooth(method = "lm", se = FALSE, color = "#3F4788FF") +
+  facet_wrap(~population, scales = "free_x", ncol = 9) +
+  stat_smooth_func(geom= "text", method = "lm", hjust = 0, parse = TRUE) +
+  scale_x_continuous(breaks = scales::pretty_breaks(3)) +
+  xlab("Percentage of Cells") +
+  ylab("log10 CFU") +
+  ggtitle("Day 90: Population and CFU Linear regression") +
+  theme(axis.text.x = element_text(size = 9, hjust = 1),
+        axis.text.y = element_text(size = 9),
+        axis.title = element_text(size = 15),
+        title = element_text(size = 17))
+```
+
+
+Confirm pipeline populations with manual gating
+
+```{r dpi = 300}
+
+# read in and clean manual gating percentage data
+manual_gating_pop3 <- read_xlsx("../data/flow/BCG_v_PBS/manual_gating_pop3.xlsx") %>%
+  dplyr::rename(`Sample` = "Sample:",
+         live_leuk = "Singlets/Leukocytes/Live | Count",
+         pop3 = "Singlets/Leukocytes/Live/CD3+/CD44+/Sca1+/IFN+/CD4-/CD8-/CD27-/CD28-/CD62L-/CD103-/CD122-/CD153-/CTLA4-/IL10-/IL17-/KLRG1-/PD1-/TNF- | Count",
+         percent_manual = "Percentage") %>%
+  filter(Sample != "D30_Lung_Group 1 D_20190218_153300_Unmixed.fcs") %>%
+  mutate(Sample = str_replace_all(Sample, " ", "_")) %>%
+  separate(Sample, into = c("Timepoint", "Organ", "group", "Group", "Number", "Date", "random", "Unmix"), sep = "_") %>%
+  mutate(Timepoint = str_replace_all(Timepoint, "D", "")) %>%
+  select(Timepoint, Group, Number, percent_manual) %>%
+  mutate(population = rep("Pop3", 24))
+
+# prepare the flow CFU data for joining with manual gating
+pipeline_pop3 <- pops_CFUs %>%
+  dplyr::filter(population == "Pop3") %>%
+  mutate(Group = str_replace_all(Group, "Group", "")) %>%
+  mutate(Timepoint = as.character(Timepoint)) %>%
+  select(-Organ, -CFU) %>%
+  dplyr::rename(percent_pipeline = percentage)
+
+# should add absolute value of the percent_pipeline-percent_manual for error (abs)
+# join the manual and pipeline percentage data
+comparison <- full_join(manual_gating_pop3, pipeline_pop3, by = c("Timepoint", "Group", "Number", "population")) %>%
+  mutate(difference = round(percent_pipeline - percent_manual, digits = 2)) %>%
+  mutate(error = round(100*(percent_pipeline - percent_manual)/percent_manual, digits = 2)) %>%
+  mutate(Group = str_replace_all(Group, "1", "PBS")) %>%
+  mutate(Group = str_replace_all(Group, "2", "BCG")) %>%
+  mutate(percent_manual = round(percent_manual, digits = 2),
+         percent_pipeline = round(percent_pipeline, digits = 2)) %>%
+  mutate(absolute_difference = abs(difference),
+         average_difference = mean(absolute_difference)) %>%
+    select(population, Timepoint, Group, Number, percent_manual, percent_pipeline, absolute_difference, average_difference) 
+
+# print out the comparison data in a pretty table
+kable1 <- comparison %>%
+  mutate(`% Based On Manual Gating` = percent_manual,
+         `% Based on Automated Pipeline` = percent_pipeline,
+         `Absolute Difference` = absolute_difference,
+         `Average Difference` = average_difference) %>%
+  mutate(Group = str_replace(Group, "PBS", "Control"),
+         Group= str_replace(Group, "BCG", "Vaccinated")) %>%
+  select(Timepoint, Group, Number, `% Based On Manual Gating`, `% Based on Automated Pipeline`, `Absolute Difference`, `Average Difference`) %>%
+  kable(align = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), font_size = 25) %>%
+  row_spec(0:nrow(comparison), color = "black")
+
+kable1
+#save_kable(kable1, file = "../figures/supp_4b.jpeg")
+
+
+```
+
+```{r}
+
+# compare the two gating types with manual v. pipeline plot
+supp_4c <- ggplot(comparison, aes(x = percent_pipeline, y = percent_manual)) +
+  geom_point(size = 3) +
+  geom_abline(slope = 1, intercept = 0, size = 1) +
+  stat_cor(aes(x = percent_pipeline, y = percent_manual), data = comparison, "spearman", size = 7) +
+  ggtitle("Population 3: Manual vs. Pipeline Percentage") +
+  xlab("Pipeline Percent") +
+  ylab("Manual Percent") +
+  theme_classic()+
+  theme(axis.title = element_text(size = 20),
+        axis.text = element_text(size = 15),
+        title = element_text(size = 15))
+supp_4c
+
+#ggsave("../figures/supp_4c.jpeg", supp_4c, dpi = 300)
+```
+
+```{r}
+
+my_colors <- list(lineage = c(`Double Negative` = "darkturquoise", 
+                              `T Helper` = "plum3",
+                              `Cytotoxic T` = "hotpink",
+                              `Double Positive` = "orange"),
+                  cell = c(`Central Mem` = "darkorchid1", `Effector` = "#F8766D",
+                `TSCM` = "#00B0F6", `Unknown` = "yellow"),
+                resident = c(`Resident`  = "maroon2", `Non-resident` = "azure"))
+
+
+plot(NULL ,xaxt='n',yaxt='n',bty='n',ylab='',xlab='', xlim=0:1, ylim=0:1)
+legend("topleft", legend =c("Negative", "Positive"), pch= 22, pt.cex=4.5, cex=1.5, bty='n',
+    col = "darkgray", pt.bg = viridis_colors)
+mtext("expression", at=0.1, cex=1.6, font = 2)
+
+plot(NULL ,xaxt='n',yaxt='n',bty='n',ylab='',xlab='', xlim=0:1, ylim=0:1)
+legend("topleft", legend =c("Double Negative", "T Helper", "Cytotoxic T", "Double Positive"), 
+       pch= 22, pt.cex=4.5, cex=1.5, bty='n',
+    col = "darkgray", pt.bg = c("darkturquoise", "plum3", "hotpink", "orange"))
+mtext("lineage", at=0.05, cex=1.6, font = 2)
+
+```
+
+
+
+```{r}
+sessionInfo()
+```
+
+

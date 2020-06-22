@@ -356,20 +356,15 @@ all_gated <- all_gated_df %>%
          IL_10 = fe(add_quantile,IL_10, "IL_10"),
          CD28 = fe(add_quantile,CD28, "CD28"),
          TNF = fe(add_quantile,TNF, "TNF")) %>%
-  select(-Zombie.NIR.A, -AF.A, -SSC.A, -FoxP3, -CD69) %>%
-  mutate_at(vars(-group_cols()), list(~tidyr::replace_na(.,0))) %>%
-  group_by_if(CD3, CD4, CD8, CD44, CD103, Sca1, IL_17, CTLA4, CD27, 
-           CD153, KLRG1, IFN,  CD122, PD1, CD62L, IL_10, CD28,
-           TNF, filename) %>%
-  dplyr::mutate(cell_no = n()) %>%
-  unique() %>%
-  ungroup() %>%
-  dplyr::group_by(filename) %>%
-  dplyr::mutate(total_count_by_file = sum(cell_no),
-         percentage = (100*cell_no / total_count_by_file)) %>%
-  ungroup() 
+  select(-Zombie.Nir.A, -AF.A, -SSC.A, -FoxP3, -CD69) %>%
+  count_calc(marker_vector = c("CD3", "CD4", "CD8", "CD44", "CD103", "Sca1", "IL_17", "CTLA4",
+                               "CD27",  "CD153", "KLRG1", "IFN",  "CD122", "PD1", "CD62L",
+                               "IL_10", "CD28","TNF", "filename"))
 
 ```
+
+
+
 
 # Visualization
 ## Initial identification of populations plot
@@ -377,21 +372,19 @@ all_gated <- all_gated_df %>%
 We first want to view all of the different cell phenotypes within the data, and then we can filter the data to see the ones that we're interested in, for example, CD3+ cells that constitute >0.5% of total live leukocytes in a sample.
 
 ```{r fig.height = 3, fig.width = 2.5}
-# to view all of the possible combinations
-# the `select` function is used here to put the columns in the order that we want
-total_phenotypes <- all_gated %>%
-    select(-filename, -percentage, -cell_no, -total_count_by_file) %>%
-  group_by_if(is.factor) %>%
-  unique() %>%
-  ungroup() %>%
-  select(CD3, CD4, CD8, CD44, CD62L, Sca1, CD103, CTLA4, CD27, CD122, CD153, CD28, PD1, KLRG1, IL_17, IL_10, IFN,  TNF) %>%
-  mutate_all(~as.numeric(.))
 
-supp_2 <-pheatmap(total_phenotypes, cluster_rows = FALSE, cluster_cols = FALSE, 
-         color = viridis_colors, show_rownames = FALSE, legend = F, fontsize = 6, angle_col = 45, width = 2, height = 1.5) 
+# this is the order of the columns that we want for the plot
+order_of_markers <- c("CD3", "CD4", "CD8",  "CD44", "CD103", "Sca1", "IL_17","CTLA4",
+                      "CD27",  "CD153", "KLRG1", "IFN",  "CD122", "PD1", "CD62L",
+                      "IL_10", "CD28","TNF")
+
+# to view all of the possible combinations
+total_phenotypes <- filter_for_total_pheno(all_gated, marker_order = order_of_markers)
+
+
+supp_2 <-heatmap_all_pheno(total_phenotypes)
 
 #ggsave("../figures/supp_2.jpeg", supp_2, dpi = 300)
-
 
 # gives the total number of populations
 nrow(total_phenotypes) 

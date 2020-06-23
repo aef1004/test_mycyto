@@ -657,14 +657,11 @@ Want to get the percentages added so can plot the percentages with the new
 ```{r}
 # I would ideally add in both of these functions to the add_perc_for_plot function, but I need the phenotype data one later...
 
-  # change the population rownames to column
+# change the population rownames to column 
 phenotype_data <- phenotype_data %>%
-    rownames_to_column(var = "population")
+  rownames_to_column(var = "population")
 
-sample_populations_all_groups <- add_perc_for_plot(phenotype_data, all_gated)
-
-# confirm that the populations were added correctly
-unique(sample_populations_all_groups$population)
+sample_populations_all_groups <- identified_pop_perc(df1 = phenotype_data, df2 = all_gated)
 
 ```
 
@@ -866,7 +863,7 @@ Data Visualization
 ```{r fig.width = 4.5, fig.height= 5}
 
 # read in the CFU data
-CFUs <- read_xlsx("../data/M.smeg_CFU.xlsx") %>%
+CFUs <- read_xlsx("../Cyto-feature_engineering/data/M.smeg_CFU.xlsx") %>%
   dplyr::filter(Organ == "Lung") %>%
   dplyr::filter(Group == "Group1" | Group == "Group2")
 
@@ -1062,7 +1059,7 @@ Confirm pipeline populations with manual gating
 ```{r dpi = 300}
 
 # read in and clean manual gating percentage data
-manual_gating_pop3 <- read_xlsx("../data/flow/BCG_v_PBS/manual_gating_pop3.xlsx") %>%
+manual_gating_pop3 <- read_xlsx("../Cyto-feature_engineering/data/flow/BCG_v_PBS/manual_gating_pop3.xlsx") %>%
   dplyr::rename(`Sample` = "Sample:",
          live_leuk = "Singlets/Leukocytes/Live | Count",
          pop3 = "Singlets/Leukocytes/Live/CD3+/CD44+/Sca1+/IFN+/CD4-/CD8-/CD27-/CD28-/CD62L-/CD103-/CD122-/CD153-/CTLA4-/IL10-/IL17-/KLRG1-/PD1-/TNF- | Count",

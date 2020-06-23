@@ -357,9 +357,17 @@ all_gated <- all_gated_df %>%
          CD28 = fe(add_quantile,CD28, "CD28"),
          TNF = fe(add_quantile,TNF, "TNF")) %>%
   select(-Zombie.Nir.A, -AF.A, -SSC.A, -FoxP3, -CD69) %>%
-  count_calc(marker_vector = c("CD3", "CD4", "CD8", "CD44", "CD103", "Sca1", "IL_17", "CTLA4",
-                               "CD27",  "CD153", "KLRG1", "IFN",  "CD122", "PD1", "CD62L",
-                               "IL_10", "CD28","TNF", "filename"))
+  mutate_at(vars(-group_cols()), list(~tidyr::replace_na(.,0))) %>%
+  group_by(CD3, CD4, CD8, CD44, CD103, Sca1, IL_17, CTLA4, CD27, 
+           CD153, KLRG1, IFN,  CD122, PD1, CD62L, IL_10, CD28,
+           TNF, filename) %>%
+  dplyr::mutate(cell_no = n()) %>%
+  unique() %>%
+  ungroup() %>%
+  dplyr::group_by(filename) %>%
+  dplyr::mutate(total_count_by_file = sum(cell_no),
+         percentage = (100*cell_no / total_count_by_file)) %>%
+  ungroup() 
 
 ```
 
@@ -477,12 +485,47 @@ fig_3a
 #ggsave("../figures/fig_3a.jpeg", fig_3a, dpi = 300)
 
 colnames(all_gated) 
+
+
+
+# see results
+test 
+
+
+all_options 
+
+
+add_pops 
+
+sample_populations_all_groups
 ```
 
 Want to get the percentages added so can plot the percentages with the new 
 
 ```{r}
-add_perc_for_plot(phenotype_data, all_gated)
+# change the population rownames to column 
+phenotype_data <- phenotype_data %>%
+  rownames_to_column(var = "population")%>%
+  rename(`IL_17` = `IL-17`,
+         `IL_10` = `IL-10`)
+
+# convert the marker columns of factor class into numeric
+all_gated <- all_gated %>%
+  mutate_if(is.factor, ~as.numeric.factor(.)) 
+
+# add the percentages from original data to the populations of filtered data
+add_perc <- left_join(phenotype_data, all_gated)
+
+# expand the data so can see which files have 0 cells in a phenotype
+all_options <- expand(add_perc, population, filename)
+
+# add the populations back 
+add_pops <- left_join(all_options, phenotype_data)
+
+# add the percentages back
+sample_populations_all_groups <- left_join(add_pops, all_gated) %>%
+  select(population, filename, percentage) %>%
+  mutate_all(list(~replace_na(., 0))) 
 
 # confirm that the populations were added correctly
 unique(sample_populations_all_groups$population)

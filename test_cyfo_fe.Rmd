@@ -482,29 +482,7 @@ colnames(all_gated)
 Want to get the percentages added so can plot the percentages with the new 
 
 ```{r}
-# change the population rownames to column 
-phenotype_data <- phenotype_data %>%
-  rownames_to_column(var = "population")%>%
-  rename(`IL_17` = `IL-17`,
-         `IL_10` = `IL-10`)
-
-# convert the marker columns of factor class into numeric
-all_gated <- all_gated %>%
-  mutate_if(is.factor, ~as.numeric.factor(.)) 
-
-# add the percentages from original data to the populations of filtered data
-add_perc <- left_join(phenotype_data, all_gated)
-
-# expand the data so can see which files have 0 cells in a phenotype
-all_options <- expand(add_perc, population, filename)
-
-# add the populations back 
-add_pops <- left_join(all_options, phenotype_data)
-
-# add the percentages back
-sample_populations_all_groups <- left_join(add_pops, all_gated) %>%
-  select(population, filename, percentage) %>%
-  mutate_all(list(~replace_na(., 0))) 
+add_perc_for_plot(phenotype_data, all_gated)
 
 # confirm that the populations were added correctly
 unique(sample_populations_all_groups$population)

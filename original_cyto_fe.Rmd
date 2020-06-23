@@ -1,0 +1,817 @@
+---
+title: "original_cyto_fe"
+output: html_document
+---
+
+I need to use this one to confirm that what i'm doing isn't drastically altering the results
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+This dataset includes mice that were vaccinated with either PBS (control) or BCG. 12 weeks later these mice were infected with *Mycobacterium tuberculosis*. They were evaluated via CFUs for bacterial burden and flow cytometry for immune populations 30, 60, and 90 days post-infection. A Cytek Aurora was used to collect the flow cytometry data.
+
+Data Manipulations
+- removed CD69 and FoxP3 markers because spillover
+- removed D30 PBS D mouse because outlier
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+First, the packages must be loaded.
+library(flowCore) - need this package if going to transform the data
+```{r warning= FALSE, message = FALSE}
+library(tibble)
+library(openCyto)
+library(data.table)
+library(ggcyto)
+library(grid)
+library(pheatmap)
+library(stringr)
+library(readxl)
+library(gridExtra)
+library(ggcorrplot)
+library(tidyverse)
+library(scales)
+library(viridis)
+library(superheat)
+library(kableExtra)
+library(ggpubr)
+library(broom)
+library(jpeg)
+```
+
+I have created a few functions to make it easier to analyze the data.
+
+- `clean_FMO_after_gate`: renames the columns; it also removes SSC boundary effects
+
+- `statSmoothFunc`: modified from <https://gist.github.com/kdauria/524eade46135f6348140> to add $r^2$ to correlation plots to correlation plots [Amy, for these modified functions, we should consider giving them different names, so that if we put these in a package and someone else loads this and the package with the original function, there won't be conflicts from two functions from separate packages having the same name. Maybe add `corr` or `r2` to the end of the functoin names?]
+
+- `stat_smooth_func`: modified from <https://gist.github.com/kdauria/524eade46135f6348140> pull out $r^2$ for correlation plots [Amy, For this and the previous function, do you think it would be easier for us to create these modified versions by adding a `geom_text` or `geom_label` line to a ggplot object, instead, rather than changing the geoms for the smooth functions?]
+
+- `as.numeric.factor`: convert the factors for the marker names into numeric for plotting [Amy: Why won't `as.numeric` work for this? That's a base R function that might avoid having to create this new function.]
+
+- `viridis_colors`: vector of the colors used for most plots
+
+- `tidy_flow_item`:  to extract data from an item of a 'flowSet' object
+
+- `tidy_flow_set`: applies tidy flow item to all items in a 'flowSet' object
+
+
+```{r}
+
+clean_FMO_after_gate <- function(FMO_df) {
+  FMO_df %>%
+  select(ends_with("-A"), -`FSC-A`, `SSC-A`, filename) %>%
+  dplyr::rename(`FoxP3` = "APC-A",
+         `CD44` = "APC-Fire 750-A",
+        `CD103` =  "APC-R700-A",       
+         `CD3` = "Alexa Fluor 532-A",
+         `Sca1` = "BB515-A",
+         `IL_10` = "BV421-A",
+         `CD4` = "BV480-A",
+         `CD69` = "BV510-A",
+         `CD8` = "BV570-A", 
+         `CTLA4` = "BV605-A",
+         `CD27` = "BV650-A",
+         `CD153` = "BV711-A",
+         `KLRG1` = "BV785-A",
+         `IL_17` = "PE-A",
+         `CD122` = "PE-Cy5-A",
+         `IFN` = "PE-Cy7-A", 
+         `CD62L` = "PE-Dazzle594-A",
+         `TNF` = "Pacific Blue-A", 
+         `CD28` = "PE-Cy5.5-A",
+         `PD1` = "PerCP-eFluor 710-A")  %>%
+   na.omit()%>%
+  dplyr::filter(`SSC-A` != max(`SSC-A`))
+
+}
+
+
+# taken from https://gist.github.com/kdauria/524eade46135f6348140
+stat_smooth_func <- function(mapping = NULL, data = NULL,
+                        geom = "smooth", position = "identity",
+                        ...,
+                        method = "auto",
+                        formula = y ~ x,
+                        se = TRUE,
+                        n = 80,
+                        span = 0.75,
+                        fullrange = FALSE,
+                        level = 0.95,
+                        method.args = list(),
+                        na.rm = FALSE,
+                        show.legend = NA,
+                        inherit.aes = TRUE,
+                        xpos = NULL,
+                        ypos = NULL) {
+  layer(
+    data = data,
+    mapping = mapping,
+    stat = StatSmoothFunc,
+    geom = geom,
+    position = position,
+    show.legend = show.legend,
+    inherit.aes = inherit.aes,
+    params = list(
+      method = method,
+      formula = formula,
+      se = se,
+      n = n,
+      fullrange = fullrange,
+      level = level,
+      na.rm = na.rm,
+      method.args = method.args,
+      span = span,
+      xpos = xpos,
+      ypos = ypos,
+      ...
+    )
+  )
+}
+
+StatSmoothFunc <- ggproto("StatSmooth", Stat,
+                      
+                      setup_params = function(data, params) {
+                        # Figure out what type of smoothing to do: loess for small datasets,
+                        # gam with a cubic regression basis for large data
+                        # This is based on the size of the _largest_ group.
+                        if (identical(params$method, "auto")) {
+                          max_group <- max(table(data$group))
+                          
+                          if (max_group < 1000) {
+                            params$method <- "loess"
+                          } else {
+                            params$method <- "gam"
+                            params$formula <- y ~ s(x, bs = "cs")
+                          }
+                        }
+                        if (identical(params$method, "gam")) {
+                          params$method <- mgcv::gam
+                        }
+                        
+                        params
+                      },
+                      
+                      compute_group = function(data, scales, method = "auto", formula = y~x,
+                                               se = TRUE, n = 80, span = 0.75, fullrange = FALSE,
+                                               xseq = NULL, level = 0.95, method.args = list(),
+                                               na.rm = FALSE, xpos=NULL, ypos=NULL) {
+                        if (length(unique(data$x)) < 2) {
+                          # Not enough data to perform fit
+                          return(data.frame())
+                        }
+                        
+                        if (is.null(data$weight)) data$weight <- 1
+                        
+                        if (is.null(xseq)) {
+                          if (is.integer(data$x)) {
+                            if (fullrange) {
+                              xseq <- scales$x$dimension()
+                            } else {
+                              xseq <- sort(unique(data$x))
+                            }
+                          } else {
+                            if (fullrange) {
+                              range <- scales$x$dimension()
+                            } else {
+                              range <- range(data$x, na.rm = TRUE)
+                            }
+                            xseq <- seq(range[1], range[2], length.out = n)
+                          }
+                        }
+                        # Special case span because it's the most commonly used model argument
+                        if (identical(method, "loess")) {
+                          method.args$span <- span
+                        }
+                        
+                        if (is.character(method)) method <- match.fun(method)
+                        
+                        base.args <- list(quote(formula), data = quote(data), weights = quote(weight))
+                        model <- do.call(method, c(base.args, method.args))
+                        
+                        m = model
+                        eq <- substitute(~~italic(r)^2~"="~r2, 
+                                         list(a = format(coef(m)[1], digits = 3), 
+                                              b = format(coef(m)[2], digits = 3), 
+                                              r2 = format(summary(m)$r.squared, digits = 3)))
+                        func_string = as.character(as.expression(eq))
+                        
+                        if(is.null(xpos)) xpos = min(data$x)*0.9
+                        if(is.null(ypos)) ypos = max(data$y)*0.9
+                        data.frame(x=xpos, y=ypos, label=func_string)
+                        
+                      },
+                      
+                      required_aes = c("x", "y")
+)
+
+viridis_colors <- c("#3F4788FF", "#56C667FF")
+
+
+as.numeric.factor <- function(x) {as.numeric(levels(x))[x]}
+
+
+
+tidy_flow_item <- function(flowSet_item){
+  flowSet_item %>% 
+    Biobase::exprs() %>% 
+    tibble::as_tibble()
+}
+
+
+tidy_flow_set <- function(flowSet){
+  flow_set <- flowCore::fsApply(x = flowSet, 
+                                FUN = tidy_flow_item)
+  flow_set <- dplyr::bind_rows(flow_set, .id = "filename")
+}
+
+```
+
+# Data Cleaning
+
+Read in the initial gating strategy, which gates to live lymphocytes, into a `gatingTemplate` class.
+
+```{r}
+# Identify the file with the gating strategy 
+ws <- list.files("../Cyto-feature_engineering/data/flow/BCG_v_PBS", 
+                 pattern = "AmyGating_intracellular.csv", 
+                 full = TRUE)
+ws
+```
+
+```{r}
+# View this template
+dtTemplate <- fread(ws)
+dtTemplate
+```
+
+```{r message = FALSE, warning = FALSE}
+# Read in the gating strategy to a 'gatingTemplate' object
+initial_gate <- gatingTemplate(ws) 
+plot(initial_gate)
+```
+
+Gating the sample data
+
+I checked that all D30, D60, and D90 samples have Zombie and will run all the way through the gating when separated by day. Looking at the data, some of them are labeled Zombie NIR-A and Zombie Nir-A which means that they are not recognized as the same. - D90 has uncapitalized. I will need to read them in separately and then rename one of the two so that the cases match
+
+```{r warning=FALSE, fig.height=2.5, fig.width=2.5}
+
+fcsFiles <- list.files("../Cyto-feature_engineering/data/flow/BCG_v_PBS/Tcell/Tcell_final/", 
+                       pattern = ".fcs", full = TRUE)
+
+# ncdfFlowset object contains row names with the individual samples and column names with the markers/parameters used in the flow cytometer
+ncfs <- read.ncdfFlowSet(fcsFiles, channel_alias = data.frame(alias = c("Zombie Nir-A"), channels = c("Zombie_NIR-A, Zombie NIR-A, Zombie Nir-A"))) 
+
+
+# apply gating set
+gs <- GatingSet(ncfs)
+
+# gate the samples
+gt_gating(initial_gate, gs)
+
+# View the gates
+plotGate(gs[[1]])
+
+
+
+# Pull out the gated data
+gated_data <- gs_pop_get_data(gs, "live") %>% 
+  as.flowSet() 
+
+
+# initialize the gated data df
+all_gated_df = data.frame()
+
+# convert the gated flow files to dataframes and add a filename column
+for (i in 1:length(gated_data)) {
+  all_data <- gated_data[[i]] %>%
+    exprs() %>%
+    data.frame() %>%
+    mutate(filename = sampleNames(gated_data[i])) 
+
+  all_gated_df <- rbind(all_gated_df, all_data)
+}
+
+
+
+# confirm that all of the data is here
+unique(all_gated_df$filename)
+
+fig_1a <- ggcyto(gs[[3]], aes(x = `FSC.A`, y = `FSC.H`)) + 
+  geom_hex(bins = 50) + 
+  geom_gate("singlets") +
+  scale_fill_viridis_c() +
+  xlab("FSC-A") +
+  ylab("FSC-H") +
+  ggtitle("Singlets") +
+  theme_gray() +
+  geom_stats(size = 7) + 
+  theme(strip.text = element_blank(),
+        axis.text = element_text(size = 24),
+        axis.title = element_text(size = 37),
+        title = element_text(size = 37)) +
+  scale_x_continuous(n.breaks = 3)
+
+fig_1a
+
+#ggsave("../figures/fig_1a.jpeg", fig_1a, dpi = 300)
+
+fig_1b <- ggcyto(gs[[3]], aes(x = `FSC-A`, y = `SSC-A`)) + 
+  ggcyto_par_set(limits = list(y = c(0, 3.5e6), x = c(-100, 3.5e6)))+
+  geom_hex(bins = 80) + 
+  geom_gate("lymph") +
+  scale_fill_viridis_c() +
+  xlab("FSC-A") +
+  ylab("SSC-A") +
+  ggtitle("Leukocytes") +
+  theme_gray() +
+  geom_stats(size = 7)+ 
+  theme(strip.text = element_blank(),
+        axis.text = element_text(size = 24),
+        axis.title = element_text(size = 37),
+        title = element_text(size = 37))+
+  scale_x_continuous(n.breaks = 3)
+
+fig_1b
+
+#ggsave("../figures/fig_1b.jpeg", fig_1b, dpi = 300)
+
+fig_1c <- ggcyto(gs[[3]], aes(x = `Zombie Nir-A`)) + 
+  geom_area(stat = "density", fill = "#440154FF") +
+  geom_gate("live")   +
+  ggcyto_par_set(limits = list(y = c(0, 5e-5), x = c(-1000, 1e5)))+
+  xlab("Zombie NIR-A") +
+  ylab("Density") +
+  ggtitle("Live") +
+  theme_gray() +
+  geom_stats(size = 7, adjust = 0.45, position = position_nudge(x = 5000)) +
+  labs_cyto("both") + 
+  theme(strip.text = element_blank(),
+        axis.text = element_text(size = 24),
+        axis.title = element_text(size = 37),
+        title = element_text(size = 37))+
+  scale_x_continuous(n.breaks = 3)
+
+fig_1c
+
+#ggsave("../figures/fig_1c.jpeg", fig_1c, dpi = 300)
+```
+
+## Data cleaning of FMOs
+
+
+
+Read in the flow cytometry data from the FMO experiments.
+
+```{r}
+# Identify the file names of all 20 FCS flow cytometry experiments to 
+# read in. 
+FMO_fcsFiles <- list.files("../Cyto-feature_engineering/data/flow/BCG_v_PBS/Tcell/FMOs", 
+                       pattern = ".fcs", full = TRUE)
+FMO_fcsFiles
+```
+
+```{r}
+# Read these files into a 'ncdfFlowSet' object. This will taken a minute
+# or so to run. The resulting 'ncdfFlowset' object contains row names with the 
+# individual samples and column names with the markers/parameters used in the flow cytometer.
+ncfs_FMO <- read.ncdfFlowSet(FMO_fcsFiles) 
+ncfs_FMO
+```
+
+Apply the initial gating to filter the data to only measurements on live lymphocyte cells.
+
+```{r}
+# Convert to a 'GatingSet' object, so we can apply the initial gating to this data.
+gs_FMO <- GatingSet(ncfs_FMO)
+gs_FMO
+```
+
+```{r fig.height = 8, fig.width = 4}
+# Apply the initial gating to this data, to filter to only measurements
+# on live lymphocyte cells. This may take a minute.
+gt_gating(initial_gate, gs_FMO)
+
+# You can plot the results of this gating with `plotGate`. For example, to plot
+# the gating for the first sample, run:
+plotGate(gs_FMO[[1]])
+```
+
+## Convert data to "tidy data" format
+
+Now that the initial gating has been applied, to limit the data to measurements oflive, singlet lymphocyte cells, we convert the data to a "tidy data" format, to allow us to work with "tidyverse" tools for further analysis and visualization.
+
+```{r}
+# Pull out the data from the 'live' node of the gating set (the last node
+# in the initial gating strategy).
+FMO_gated_data <- gs_pop_get_data(gs_FMO, "live") %>% 
+  as.flowSet() 
+```
+
+Apply this function to the 'flowSet' of gated FMO data:
+
+```{r}
+FMO_gated_data <- tidy_flow_set(FMO_gated_data)
+FMO_gated_data
+```
+
+
+```{r}
+# confirm that all of the files were read in correctly
+unique(FMO_gated_data$filename)
+```
+
+[Let's clean up this file so we don't have redos, instead just a clean flow
+through our final code.]
+
+```{r}
+# I accidently got CD4 into the CD4 FMO, so I had to redo it. I also tried CD69 to see if it was experiment-dependent, but CD69 problems are due to spillover
+
+# Add in the updated FMOS
+FMO_fcsFiles_redo <- list.files("../Cyto-feature_engineering/data/flow/BCG_v_PBS/Tcell/FMOs/June6_Redo", 
+                       pattern = ".fcs", full = TRUE)
+
+ncfs_FMO_redo <- read.ncdfFlowSet(FMO_fcsFiles_redo) 
+
+# apply gating set
+gs_FMO_redo <- GatingSet(ncfs_FMO_redo)
+
+# gate the samples
+gt_gating(initial_gate, gs_FMO_redo)
+
+# Pull out the data
+FMO_gated_data_redo <- gs_pop_get_data(gs_FMO_redo, "live") %>% 
+  as.flowSet() 
+
+FMO_gated_df_redo <- tidy_flow_set(FMO_gated_data_redo)
+```
+
+
+```{r}
+# when I redid the FMOs, I used lowercase for naming Zombie, so must convert to uppercase to match the previous samples
+FMO_gated_df_redo <- FMO_gated_df_redo %>%
+  dplyr::select(-`SSC-B-H`, - `SSC-B-A`) %>%
+  dplyr::rename("Zombie NIR-A" = "Zombie Nir-A",
+         "Zombie NIR-H" = "Zombie Nir-H")
+
+# combine the new and old FMOs
+FMO_gated_data <- rbind(FMO_gated_data, FMO_gated_df_redo)
+
+```
+
+This visualization is to look at the initial gating of the FMOs to ensure that the gates are placed correctly.
+```{r fig.height = 8, fig.width = 4}
+plotGate(gs_FMO[[3]])
+```
+
+# Feature Engineering
+## FMOs
+Pull out the individual FMOS
+
+```{r}
+
+CD3_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_CD3_20190218_153937_Unmixed.fcs")
+
+CD4_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_CD4_June_6_Redo_Unmixed.fcs")
+
+CD8_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_CD8_20190218_154138_Unmixed.fcs")
+
+CD27_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_CD27_20190218_154154_Unmixed.fcs")
+
+CD28_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_CD28_20190218_154012_Unmixed.fcs")
+
+CD44_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_CD44_20190218_154054_Unmixed.fcs")
+
+CD62L_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_CD62L_20190218_153953_Unmixed.fcs") 
+
+CD69_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_CD69_June_6_Redo_Unmixed.fcs")
+
+CD103_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_CD103_20190218_154045_Unmixed.fcs")
+
+CD122_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_CD122_20190218_154003_Unmixed.fcs")
+
+CD153_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_CD153_20190218_154205_Unmixed.fcs")
+
+CTLA4_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_CTLA4_20190218_154146_Unmixed.fcs")
+
+FoxP3_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_FoxP3_20190218_154037_Unmixed.fcs") 
+
+IFN_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_IFN-G_20190218_154029_Unmixed.fcs")
+
+IL_10_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_IL-10_20190218_154102_Unmixed.fcs") 
+
+IL_17_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_IL-17_20190218_153945_Unmixed.fcs")
+
+KLRG1_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_KLRG1_20190218_154214_Unmixed.fcs") 
+
+PD1_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_PD1_20190218_154021_Unmixed.fcs")
+
+Sca1_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_Sca1_20190218_153845_Unmixed.fcs")
+
+TNF_FMO <- FMO_gated_data %>%
+  clean_FMO_after_gate() %>%
+  dplyr::filter(filename == "FMOs_TNF-a_20190218_154111_Unmixed.fcs")
+```
+
+## Gate on FMOs with 99% threshold for + and - populations
+Feature engineering FMOs and plot
+
+```{r fig.width=8, fig.height=6}
+
+FMO_ggplot <- function(df, x_axis, x_title) {
+  ggplot(df, aes(x = x_axis, y = `SSC-A`)) +
+   geom_hex(bins = 100, na.rm = TRUE) +
+   scale_fill_viridis_c() +
+   xlab(x_title) +
+   ylab("") +
+   geom_vline(xintercept = quantile(x_axis, 0.99)) +
+  theme_gray()+
+  theme(axis.text = element_text(size =12),
+        axis.title = element_text(size = 20))+
+  scale_x_continuous(labels = scientific, limits = c(-10000, 20000), breaks = c(-10000, 0, 20000))
+}
+
+p1 <- FMO_ggplot(CD3_FMO, CD3_FMO$CD3, "CD3")
+p2 <- FMO_ggplot(CD4_FMO, CD4_FMO$CD4, "CD4")
+p3 <- FMO_ggplot(CD8_FMO, CD8_FMO$CD8, "CD8")
+p4 <- FMO_ggplot(CD27_FMO, CD27_FMO$CD27, "CD27")
+p5 <- FMO_ggplot(CD28_FMO, CD28_FMO$CD28, "CD28")
+p6 <- FMO_ggplot(CD44_FMO, CD44_FMO$CD44, "CD44")
+p7 <- FMO_ggplot(IL_10_FMO, IL_10_FMO$IL_10, "IL_10")
+p8 <- FMO_ggplot(CD62L_FMO, CD62L_FMO$CD62L, "CD62L")
+p9 <- FMO_ggplot(CD103_FMO, CD103_FMO$CD103, "CD103")
+p10 <- FMO_ggplot(CD122_FMO, CD122_FMO$CD122, "CD122")
+p11 <- FMO_ggplot(CD153_FMO, CD153_FMO$CD153, "CD153")
+p12 <- FMO_ggplot(CTLA4_FMO, CTLA4_FMO$CTLA4, "CTLA4")
+p13 <- FMO_ggplot(IL_17_FMO, IL_17_FMO$IL_17, "IL_17")
+p14 <- FMO_ggplot(IFN_FMO, IFN_FMO$IFN, "IFN")
+p15 <- FMO_ggplot(TNF_FMO, TNF_FMO$TNF, "TNF")
+p16 <- FMO_ggplot(KLRG1_FMO, KLRG1_FMO$KLRG1, "KLRG1")
+p17 <- FMO_ggplot(PD1_FMO, PD1_FMO$PD1, "PD1")
+p18 <- FMO_ggplot(Sca1_FMO, Sca1_FMO$Sca1, "Sca1")
+
+fig_2 <- grid.arrange(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10,
+             p11, p12, p13, p14, p15, p16, p17, p18,  
+             nrow = 5, left = textGrob("SSC-A", rot = 90, vjust = 1, gp=gpar(fontsize=24, lineheight=1)))
+
+#ggsave("../figures/fig_2.jpeg", fig_2, dpi = 300)
+```
+
+
+## Feature engineer the data
+
+Feature cut the data to get all of the possible populations for each file with the cell count and number of cells. Feature engineering is based on the 99%.
+
+Remove FoxP3
+Remove CD69 - spreading from Sca1 makes the marker unusable
+Remove D30 PBS D - flow cytometry outlier, both within group, timepoint, and all samples
+```{r}
+
+all_gated <- all_gated_df %>%
+  dplyr::filter(filename != "D30_Lung_Group 1 D_20190218_153300_Unmixed.fcs") %>%
+  mutate(Time = str_extract(filename, "D[0-9]*")) %>%
+  mutate(Group = str_extract(filename, "Group\\s[0-9]\\s[A-Z]")) %>%
+  unite(filename, c("Time", "Group")) %>%
+  mutate(filename= str_replace_all(filename, "\\s", "_")) %>%
+  select(ends_with(".A"), -`FSC.A`, filename) %>%
+  dplyr::rename(`FoxP3` = "APC.A",
+         `CD44` = "APC.Fire.750.A",
+        `CD103` =  "APC.R700.A",       
+         `CD3` = "Alexa.Fluor.532.A",
+         `Sca1` = "BB515.A",
+         `IL_10` = "BV421.A",
+         `CD4` = "BV480.A",
+         `CD69` = "BV510.A",
+         `CD8` = "BV570.A", 
+         `CTLA4` = "BV605.A",
+         `CD27` = "BV650.A",
+         `CD153` = "BV711.A",
+         `KLRG1` = "BV785.A",
+         `IL_17` = "PE.A",
+         `CD122` = "PE.Cy5.A",
+         `IFN` = "PE.Cy7.A", 
+         `CD62L` = "PE.Dazzle594.A",
+         `TNF` = "Pacific.Blue.A", 
+         `CD28` = "PE.Cy5.5.A",
+         `PD1` = "PerCP.eFluor.710.A") %>%
+  na.omit() %>%
+  dplyr::filter(`SSC.A` != max(`SSC.A`)) %>%
+  mutate(CD3 = cut(CD3, breaks = c(min(CD3), quantile(CD3_FMO$CD3, 0.99), max(CD3)), 
+                       labels = c("0", "1")),
+         CD4 = cut(CD4, breaks = c(min(CD4), quantile(CD4_FMO$CD4, 0.99), max(CD4)),
+                       labels = c(0, 1)),
+         CD8 = cut(CD8, breaks = c(min(CD8), quantile(CD8_FMO$CD8, 0.99), max(CD8)),
+                       labels = c(0, 1)),
+         CD44 = cut(CD44, breaks = c(min(CD44), quantile(CD44_FMO$CD44, 0.99),
+                                         max(CD44)), labels = c(0, 1)),
+         CD103 = cut(CD103, breaks = c(min(CD103), quantile(CD103_FMO$CD103, 0.99),
+                                           max(CD103)), labels = c(0, 1)),
+         Sca1 = cut(Sca1, breaks = c(min(Sca1), quantile(Sca1_FMO$Sca1, 0.99),
+                                         max(Sca1)), labels = c(0, 1)),
+         IL_17 = cut(IL_17, breaks = c(min(IL_17), quantile(IL_17_FMO$IL_17, 0.99),
+                                         max(IL_17)),labels = c(0, 1)),
+         CD69 = cut(CD69, breaks = c(min(CD69), quantile(CD69_FMO$CD69, 0.99),
+                                         max(CD69)),labels = c(0, 1)),
+         CTLA4 = cut(CTLA4, breaks = c(min(CTLA4), quantile(CTLA4_FMO$CTLA4, 0.99),
+                                           max(CTLA4)),labels = c(0, 1)),
+         CD27 = cut(CD27, breaks = c(min(CD27), quantile(CD27_FMO$CD27, 0.99),
+                                         max(CD27)), labels = c(0, 1)),
+         CD153 = cut(CD153, breaks = c(min(CD153), quantile(CD153_FMO$CD153, 0.99), 
+                                           max(CD153)),labels = c(0, 1)),
+         KLRG1 = cut(KLRG1, breaks = c(min(KLRG1), quantile(KLRG1_FMO$KLRG1, 0.99), 
+                                           max(KLRG1)), labels = c(0, 1)),
+         IFN = cut(IFN, breaks = c(min(IFN), quantile(IFN_FMO$IFN, 0.99), 
+                                           max(IFN)), labels = c(0, 1)),
+         FoxP3 = cut(FoxP3, breaks = c(min(FoxP3), quantile(FoxP3_FMO$FoxP3, 0.99), 
+                                           max(FoxP3)), labels = c(0, 1)),
+         CD122 = cut(CD122, breaks = c(min(CD122), quantile(CD122_FMO$CD122, 0.99), 
+                                           max(CD122)), labels = c(0, 1)),
+         PD1 = cut(PD1, breaks = c(min(PD1), quantile(PD1_FMO$PD1, 0.99), 
+                                       max(PD1)), labels = c(0, 1)),
+         CD62L = cut(CD62L, breaks = c(min(CD62L), quantile(CD62L_FMO$CD62L, 0.99),
+                                           max(CD62L)), labels = c(0, 1)),
+         IL_10 = cut(IL_10, breaks = c(min(IL_10), 
+                                             quantile(IL_10_FMO$IL_10, 0.99),
+                                             max(IL_10)), labels = c(0, 1)),
+         CD28 = cut(CD28, breaks = c(min(CD28), quantile(CD28_FMO$CD28, 0.99),
+                                         max(CD28)), labels = c(0, 1)),
+         TNF = cut(TNF, breaks = c(min(TNF), quantile(TNF_FMO$TNF, 0.99),
+                                           max(TNF)), labels = c(0, 1))) %>%
+  select(-Zombie.Nir.A, -AF.A, -SSC.A, -FoxP3, -CD69) %>%
+  mutate_at(vars(-group_cols()), list(~tidyr::replace_na(.,0))) %>%
+  group_by(CD3, CD4, CD8, CD44, CD103, Sca1, IL_17, CTLA4, CD27, 
+           CD153, KLRG1, IFN,  CD122, PD1, CD62L, IL_10, CD28,
+           TNF, filename) %>%
+  dplyr::mutate(cell_no = n()) %>%
+  unique() %>%
+  ungroup() %>%
+  dplyr::group_by(filename) %>%
+  dplyr::mutate(total_count_by_file = sum(cell_no),
+         percentage = (100*cell_no / total_count_by_file)) %>%
+  ungroup() 
+
+```
+
+# Visualization
+## Initial identification of populations plot
+
+We first want to view all of the different cell phenotypes within the data, and then we can filter the data to see the ones that we're interested in, for example, CD3+ cells that constitute >0.5% of total live leukocytes in a sample.
+
+```{r fig.height = 3, fig.width = 2.5}
+# to view all of the possible combinations
+total_phenotypes <- all_gated %>%
+    select(-filename, -percentage, -cell_no, -total_count_by_file) %>%
+  group_by(CD3, CD4, CD8, CD44, CD103, Sca1, IL_17,  CTLA4, CD27, 
+           CD153, KLRG1, IFN,  CD122, PD1, CD62L, IL_10, CD28,
+           TNF) %>%
+  unique() %>%
+  ungroup() %>%
+ select(CD3, CD4, CD8, CD44, CD62L, Sca1, CD103, CTLA4, CD27, CD122, CD153, CD28, PD1, KLRG1, IL_17, IL_10, IFN,  TNF) %>%
+  mutate_all(~as.numeric.factor(.)) %>%
+  rename(`IL-17` = `IL_17`,
+         `IL-10` = `IL_10`)
+
+supp_2 <-pheatmap(total_phenotypes, cluster_rows = FALSE, cluster_cols = FALSE, 
+         color = viridis_colors, show_rownames = FALSE, legend = F, fontsize = 6, angle_col = 45, width = 2, height = 1.5) 
+
+#ggsave("../figures/supp_2.jpeg", supp_2, dpi = 300)
+
+
+# gives the total number of populations
+nrow(total_phenotypes) 
+
+
+
+
+```
+
+## Filter to smaller subset of populations and plot
+
+Want to add annotations to the phenotype plot
+
+- lineage
+- cell
+- resident
+
+based on expression of different markers. The phenotype plot is then arranged by lineage, cell and resident cells and split by the lineage (I should try to find a way to do this automatically).
+
+```{r fig.width = 4, fig.height = 6}
+# view the specific cell phenotypes we're interested in
+sample_populations <- all_gated %>%
+  dplyr::filter(CD3 == 1 & percentage > 0.5) %>%
+  select(-filename, -percentage, -cell_no, -total_count_by_file) %>%
+  group_by(CD3, CD4, CD8, CD44, CD103, Sca1, IL_17, CTLA4, CD27, 
+           CD153, KLRG1, IFN,  CD122, PD1, CD62L, IL_10, CD28,
+           TNF) %>%
+  unique() %>%
+  ungroup() %>%
+  mutate(population = paste0("Pop", 1:length(CD3)))
+
+# add in the percentage of cells in each specific population after the filter
+test <- left_join(sample_populations, all_gated)
+
+# expand to add in the data where a mouse may have 0 cells in a certain population identified after the filter
+all_options <- expand(test, population, filename)
+
+# add in the population information
+add_pops <- left_join(all_options, sample_populations)
+
+# add populations to the original gated data and replace NA percentages with 0
+sample_populations_all_groups <- left_join(add_pops, all_gated) %>%
+  select(population, filename, percentage) %>%
+  mutate_all(list(~tidyr::replace_na(.,0)))
+
+# these are the colors I want for the pheatmap annotations
+my_colors <- list(lineage = c(`Double Negative` = "darkturquoise", 
+                              `T Helper` = "plum3",
+                              `Cytotoxic T` = "hotpink",
+                              `Double Positive` = "orange"),
+                  cell = c(`Central Mem` = "darkorchid1", `Effector` = "#F8766D",
+                `TSCM` = "#00B0F6", `Unknown` = "yellow"),
+                resident = c(`Resident`  = "maroon2", `Non-resident` = "azure"))
+
+# take the filtered data and add annotations for the differnt lineages, cell type, and resident status
+phenotype_data <- sample_populations %>%
+  mutate_all(~as.numeric.factor(.)) %>%
+      mutate(lineage = ifelse(CD4 == 0 & CD8 ==0, "Double Negative",
+                          ifelse(CD4 == 1 & CD8 ==0,"T Helper",
+                          ifelse(CD4 ==0 & CD8 ==1, "Cytotoxic T", 
+                                 "Double Positive")))) %>%
+  mutate(cell = ifelse(CD44 == 0 & CD62L == 1 & Sca1 == 1, "TSCM", 
+                       ifelse(CD44 ==1 & CD62L==0, "Effector", 
+                              ifelse(CD44 == 0 & CD62L == 1 & Sca1 == 0, "Naive",
+                                     ifelse(CD44==1 & CD62L ==1, "Central Mem",
+                                     "Unknown"))))) %>%
+  mutate(resident = ifelse(CD103 == 1, "Resident", "Non-resident")) %>%
+  select(lineage, cell, resident, CD3, CD4, CD8, CD44, CD62L, Sca1, CD103,  CTLA4, CD27, CD122, CD153, CD28, PD1, KLRG1, IL_17, IL_10, IFN,  TNF) %>%
+  arrange(match(lineage, c("Double Negative", "T Helper", "Cytotoxic T", "Double Positive")), cell, resident) %>%
+  mutate(population = c(paste0("Pop", 1: nrow(sample_populations)))) %>%
+  column_to_rownames("population") %>%
+  rename(`IL-17` = `IL_17`,
+         `IL-10` = `IL_10`)
+
+# create an annotated data frame to add to pheatmap
+phenotype_annot <- phenotype_data %>%
+  select(resident, cell, lineage) %>%
+  mutate(population = c(paste0("Pop", 1: nrow(sample_populations)))) %>%
+  column_to_rownames("population")
+
+# count the number of rows with each phenotype to create gaps in the plot
+DN_length <- sum(phenotype_data$lineage == "Double Negative")
+T_helper_length <- sum(phenotype_data$lineage == "T Helper")
+Cytotoxic_length <- sum(phenotype_data$lineage == "Cytotoxic T")
+DP_length <- sum(phenotype_data$lineage == "Double Positive")
+
+# plot the data with different annotations
+fig_3a <- pheatmap(phenotype_data[, 4:21], cluster_rows = FALSE, cluster_cols = FALSE,
+           labels_row = paste("Pop", 1:nrow(sample_populations)), 
+           annotation_row = phenotype_annot,  gaps_row = c(DN_length, DN_length + T_helper_length, DN_length + T_helper_length + Cytotoxic_length),
+           cellwidth = 15, cellheight = 15, angle_col = 45, annotation_colors = my_colors,
+         color = viridis_colors, cutree_rows = 2, legend = FALSE)
+
+fig_3a
+
+#ggsave("../figures/fig_3a.jpeg", fig_3a, dpi = 300)
+```

@@ -43,18 +43,28 @@ Extract the one row of CFU/dilution that we want to look at
 
 This basically says - choose the dilution/CFU that is the closest to 25 CFUs (because normally we'd count the one that's between 5-50 CFUs for accuracy)
 ```{r}
-CFU_excel_clean <- CFU_excel_raw %>%
-  gather(key = dilution, value = CFUs, -`group`, -mouse, -organ) %>%
-  mutate(dilution = str_replace(dilution, "dilution_", "")) %>%
-  mutate(group_mouse = paste0(group, mouse)) %>%
-  mutate(CFUs = as.numeric(CFUs),
-         dilution = as.numeric(dilution)) %>%
-  mutate(CFUs_2 = ifelse(CFUs == 0, NA, CFUs),
+# selects all columns that start with dilution
+tidy_CFU <- function(df, CFU_column, grouping_columns) {
+  
+  CFU_column = as.name(CFU_column) # use this because I'm making changes to the column
+  grouping_columns <- syms(grouping_columns) # use this for grouping
+  
+  df %>%
+    gather(key = dilution, value = CFUs, matches("dilution")) %>%
+    mutate(dilution = str_replace(dilution, "dilution_", ""),
+           dilution = as.numeric(dilution),
+           CFUs = str_replace(!! sym(CFU_column), "TNTC", "NA"),
+           CFUs = as.numeric(!! sym(CFU_column))) %>%
+    mutate(CFUs_2 = ifelse(CFUs == 0, NA, CFUs),
          sub_CFUs = abs(25 - CFUs_2)) %>%
-  group_by(group_mouse, organ) %>%
-  arrange(group_mouse, sub_CFUs, dilution) %>%
-  slice(1) %>%
-  select(-CFUs_2, -sub_CFUs)
+    group_by(!!!grouping_columns) %>%
+    arrange(!!!grouping_columns, sub_CFUs, dilution) %>% 
+    slice(1) %>%
+    select(-CFUs_2, -sub_CFUs)
+}
+
+CFU_excel_clean <- tidy_CFU(CFU_excel_raw, "CFUs", c("group", "mouse", "organ"))
+
 
 # add in the dilution facotr, resuspend_volume, and percentage
 CFU_all_data <- CFU_excel_clean %>%

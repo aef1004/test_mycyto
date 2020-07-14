@@ -1,0 +1,133 @@
+---
+title: "test_CFU_calcs"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggbeeswarm)
+library(emmeans)
+library(ggplot2)
+library(stats)
+library(ggpubr)
+library(broom)
+library(purrr)
+```
+
+
+The only data that needs to be input into this file is the file path to the CFUs
+
+Make the pheno data in two different sheets 
+Or read the two sets of data separately
+```{r}
+file_path <- "../data/D-21_CFUs.xlsx"
+```
+
+```{r}
+# read in the raw data
+CFU_excel_raw <- read_xlsx(file_path, col_names = TRUE, sheet = "counts")
+
+# read in the metadata aka CFU_pheno_data
+CFU_metadata <- read_xlsx(file_path, col_names = TRUE, sheet = "metadata")
+```
+
+Try to combine lung and spleen
+Extract the one row of CFU/dilution that we want to look at
+
+This basically says - choose the dilution/CFU that is the closest to 25 CFUs (because normally we'd count the one that's between 5-50 CFUs for accuracy)
+```{r}
+CFU_excel_clean <- CFU_excel_raw %>%
+  gather(key = dilution, value = CFUs, -`group`, -mouse, -organ) %>%
+  mutate(dilution = str_replace(dilution, "dilution_", "")) %>%
+  mutate(group_mouse = paste0(group, mouse)) %>%
+  mutate(CFUs = as.numeric(CFUs),
+         dilution = as.numeric(dilution)) %>%
+  mutate(CFUs_2 = ifelse(CFUs == 0, NA, CFUs),
+         sub_CFUs = abs(25 - CFUs_2)) %>%
+  group_by(group_mouse, organ) %>%
+  arrange(group_mouse, sub_CFUs, dilution) %>%
+  slice(1) %>%
+  select(-CFUs_2, -sub_CFUs)
+
+# add in the dilution facotr, resuspend_volume, and percentage
+CFU_all_data <- CFU_excel_clean %>%
+  mutate(dilution_factor = CFU_metadata$dilution_factor,
+         resuspend_volume_mL = CFU_metadata$resuspend_volume_mL,
+         percent = case_when(organ == "Lung" ~ CFU_metadata$lung_percent,
+                             TRUE ~ CFU_metadata$spleen_percent))
+
+
+CFU_all_data_clean <- CFU_all_data %>%
+  mutate(dilution = as.numeric(dilution),
+         CFUs = as.numeric(CFUs),
+         dilution_factor = as.numeric(dilution_factor),
+         resuspend_volume_mL = as.numeric(resuspend_volume_mL),
+         percent = as.numeric(percent)) 
+```
+
+Calculate CFUs
+```{r}
+# set the constants or can pull out from the metadata
+dilution_factor <- 5
+resuspend_volume_ml <- 0.5
+percent <- 0.3
+
+# calculate the CFUs based on the given data
+calculate_cfu <- function(df, dilution_factor, resuspend_volume_ml, percent, dilution_column, CFU_column) {
+  
+  CFU_column = as.name(CFU_column)
+  dilution_column = as.name(dilution_column)
+  
+  df %>%
+    mutate(calculated_CFU = (10*!! rlang::sym(CFU_column)*dilution_factor^ !! rlang::sym(dilution_column))*resuspend_volume_mL,
+         whole_CFUs = calculated_CFU/percent,
+         log_CFUs = log10(whole_CFUs),
+         log_CFUs = as.numeric(str_replace(log_CFUs, "-Inf", "0")))
+}
+
+calculate_cfu(CFU_all_data_clean, 5, 0.5, 0.3, "dilution", "CFUs")
+
+```
+
+
+```{r}
+D_minus21_Spleen <- D_minus21_CFUs  %>%
+  filter(organ == "Spleen")
+OneWayFit <- lm(log_CFUs ~ group, data = D_minus21_Spleen )
+anova(OneWayFit)
+emmeans(OneWayFit, dunnett ~ group)
+```
+
+```{r}
+D_minus21_Lung <- D_minus21_CFUs  %>%
+  filter(organ == "Lung")
+OneWayFit <- lm(log_CFUs ~ group, data = D_minus21_Lung )
+anova(OneWayFit)
+emmeans(OneWayFit, dunnett ~ group)
+```
+
+Plot the data
+```{r warning= FALSE}
+ggplot(D_minus21_CFUs, aes(x = factor(group, levels = c("PBS", "BCG", "Los Injection", "Prop Injection", "PL Injection", "Los Oral", "Prop Oral","PL Oral")), 
+                       y= log_CFUs, color = factor(group, levels = c("PBS", "BCG", "Los Injection", "Prop Injection", "PL Injection", "Los Oral", "Prop Oral","PL Oral")))) +
+  geom_point() +
+  geom_beeswarm(grouponX = TRUE) +
+  facet_wrap(~organ) +
+  labs(x = "Group", y = "Log10 CFUs", color = "Group") +
+  ggtitle("PL Experiment Lung D-21 BCG CFUs")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+# find the average CFUs per mouse organ
+avg_CFU_final <- aggregate(log_CFU_df$log_CFUs, by = list(Group_Mouse = tester$Group_Mouse), FUN = mean) %>%
+  rename(avg_log_CFUs = x) %>%
+  separate(Group_Mouse, into = c("Group", "Mouse"), sep = "_")
+```

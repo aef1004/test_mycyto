@@ -3,6 +3,14 @@ title: "test_CFU_calcs"
 output: html_document
 ---
 
+
+Try both ways of calculations and see which is better
+Cheap/not difficult experiment to test/verify (check literature to see if anyone else has done this)
+
+bactcountr
+
+pivot_wider
+pivot_longer instead of gather
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
@@ -53,7 +61,8 @@ tidy_CFU <- function(df, CFU_column) {
     mutate(dilution = str_replace(dilution, "dilution_", ""),
            dilution = as.numeric(dilution),
            CFUs = str_replace(!! sym(CFU_column), "TNTC", "NA"),
-           CFUs = as.numeric(!! sym(CFU_column)))
+           CFUs = as.numeric(!! sym(CFU_column))) %>%
+    na.omit()
 }
 
 CFU_excel_middle <- tidy_CFU(CFU_excel_raw, "CFUs")
@@ -64,16 +73,20 @@ pick_one_dilution <- function(df, CFU_column, grouping_columns) {
   grouping_columns <- syms(grouping_columns) # use this for grouping
   
   df %>%
-    mutate(CFUs_2 = ifelse(CFUs == 0, NA, CFUs),
-         sub_CFUs = abs(25 - CFUs_2)) %>%
+    mutate(CFUs_2 = ifelse(CFUs == 0, NA, CFUs), # maybe don't need to convert to NA
+         sub_CFUs = abs(25 - CFUs_2)) %>% # see if we can do this a little bit more elegantly
     group_by(!!!grouping_columns) %>%
     arrange(!!!grouping_columns, sub_CFUs, dilution) %>% 
     slice(1) %>%
     select(-CFUs_2, -sub_CFUs)
 }
 
-CFU_excel_clean <- tidy_CFU(CFU_excel_middle, "CFUs", c("group", "mouse", "organ"))
+CFU_excel_clean <- pick_one_dilution(CFU_excel_middle, "CFUs", c("group", "organ", "mouse"))
 ```
+Think about edge cases - things that may cause this function to fail
+ - warning if all CFUs are TNTC - in this case, remove this mouse from analysis 
+ - if there are ties  - 
+
 
 Constants value extraction - note that I'm not using this part at the moment
 ```{r}
@@ -95,7 +108,7 @@ resuspend_volume_ml <- 0.5
 percent <- 0.3
 
 # calculate the CFUs based on the given data
-calculate_cfu <- function(df, dilution_factor, resuspend_volume_mL, percent, dilution_column, CFU_column) {
+calculate_cfu <- function(df, dilution_factor, resuspend_volume_mL, percent, dilution_column = "dilution", CFU_column = "CFUs") {
   
   CFU_column = as.name(CFU_column)
   dilution_column = as.name(dilution_column)
@@ -104,13 +117,21 @@ calculate_cfu <- function(df, dilution_factor, resuspend_volume_mL, percent, dil
     mutate(calculated_CFU = (10*!! rlang::sym(CFU_column)*dilution_factor^ !! rlang::sym(dilution_column))*resuspend_volume_mL,
          whole_CFUs = calculated_CFU/percent,
          log_CFUs = log10(whole_CFUs),
-         log_CFUs = as.numeric(str_replace(log_CFUs, "-Inf", "0")))
+         log_CFUs = as.numeric(str_replace(log_CFUs, "-Inf", "0"))) # could add a case_when for this part 
   
   return(new_df)
 }
 
-calculate_cfu(CFU_all_data_clean, 5, 0.5, 0.3, "dilution", "CFUs")
+calculate_cfu(CFU_excel_clean, 5, 0.5, .5, "dilution", "CFUs")
 
+new_df <- data.frame(organ = c("Lung", "Spleen"), dilution_factor = c(5,5), resuspend_volume_ml = c(0.5, 0.5), percent = c(0.3, 0.5))
+
+CFU_excel_clean %>%
+  group_by(organ) %>%
+  nest() %>%
+  full_join(new_df, by = "organ") %>%
+  select(data, dilution_factor:percent, organ) %>%
+  pmap(.f = calculate_cfu)
 ```
 
 # Distribution of CFUs
